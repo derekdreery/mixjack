@@ -106,7 +106,7 @@ impl Event {
 
                     _ => return None,
                 }
-            },
+            }
 
             // button on
             0x90 | 0x98 => match raw.get(1)? {
@@ -161,4 +161,3 @@ impl Event {
         })
     }
 }
-

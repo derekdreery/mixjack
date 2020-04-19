@@ -6,6 +6,7 @@ use crossbeam_channel as channel;
 use itertools::izip;
 use jack::{AudioIn, AudioOut, Client, Control, MidiIn, Port, ProcessHandler, ProcessScope};
 use novation_launch_control::Event;
+use std::{f32::consts::PI, iter};
 use structopt::StructOpt;
 
 use crate::cli::Opt;
@@ -29,7 +30,7 @@ fn run(opts: Opt) -> Result {
     // a channel for finding out when the ui has shut down.
     let (shutdown_tx, shutdown_rx) = channel::bounded(0);
 
-    let ports = Ports::setup(&client, tx_rt, rx_rt)?;
+    let ports = Ports::setup(&client, tx_rt, rx_rt, 200.0, 2000.0, 81)?;
     // todo look at shutting down gracefully, whether that is necessary
     let _async_client = client.activate_async((), ports)?;
 
@@ -69,6 +70,15 @@ struct Ports {
     ui_in: channel::Receiver<Msg>,
     ui_out: channel::Sender<Msg>,
     state: State,
+    // filter coeffs
+    low_filter: Box<[f32]>,
+    mid_filter: Box<[f32]>,
+    high_filter: Box<[f32]>,
+    // filter buffers - used as ring buffers
+    in1_left_buf: Box<[f32]>,
+    in1_right_buf: Box<[f32]>,
+    // TODO the rest
+    buf_position: usize,
 }
 
 impl Ports {
@@ -77,6 +87,9 @@ impl Ports {
         client: &Client,
         tx: channel::Sender<Msg>,
         rx: channel::Receiver<Msg>,
+        low_mid_freq: f32,
+        mid_high_freq: f32,
+        filter_length: usize,
     ) -> Result<Ports> {
         let in1_left = client.register_port("in_1l", AudioIn)?;
         let in1_right = client.register_port("in_1r", AudioIn)?;
@@ -86,8 +99,10 @@ impl Ports {
         let in3_right = client.register_port("in_3r", AudioIn)?;
         let in4_left = client.register_port("in_4l", AudioIn)?;
         let in4_right = client.register_port("in_4r", AudioIn)?;
+
         let out_left = client.register_port("out_left", AudioOut)?;
         let out_right = client.register_port("out_right", AudioOut)?;
+
         let control_in = client.register_port("novation_SCXL_in", MidiIn)?;
 
         Ok(Ports {
@@ -105,6 +120,28 @@ impl Ports {
             ui_out: tx,
             ui_in: rx,
             state: State::default(),
+            low_filter: compute_lowpass_filter(
+                low_mid_freq,
+                client.sample_rate() as f32,
+                filter_length,
+            )
+            .into_boxed_slice(),
+            mid_filter: compute_bandpass_filter(
+                low_mid_freq,
+                mid_high_freq,
+                client.sample_rate() as f32,
+                filter_length,
+            )
+            .into_boxed_slice(),
+            high_filter: compute_highpass_filter(
+                mid_high_freq,
+                client.sample_rate() as f32,
+                filter_length,
+            )
+            .into_boxed_slice(),
+            in1_left_buf: vec![0.0; filter_length].into_boxed_slice(),
+            in1_right_buf: vec![0.0; filter_length].into_boxed_slice(),
+            buf_position: 0,
         })
     }
 }
@@ -114,7 +151,7 @@ impl ProcessHandler for Ports {
         use channel::TryRecvError;
 
         let mut shutdown = false;
-        // process control events
+        // process midi events
         for raw_midi in self.control_in.iter(process_scope) {
             if let Some(evt) = Event::parse(raw_midi.bytes) {
                 if let Some(msg) = convert_midi(evt) {
@@ -126,6 +163,7 @@ impl ProcessHandler for Ports {
                 }
             }
         }
+        // process ui events
         loop {
             match self.ui_in.try_recv() {
                 Ok(msg) => {
@@ -155,6 +193,7 @@ impl ProcessHandler for Ports {
         let in2_left = self.in2_left.as_slice(process_scope);
         let in3_left = self.in3_left.as_slice(process_scope);
         let in4_left = self.in4_left.as_slice(process_scope);
+        let mut buf_pos = self.buf_position;
         for (out, in1, in2, in3, in4) in izip!(
             out_left.iter_mut(),
             in1_left.iter(),
@@ -162,7 +201,26 @@ impl ProcessHandler for Ports {
             in3_left.iter(),
             in4_left.iter()
         ) {
-            *out = in1 * fader_4_1 + in2 * fader_4_3 + in3 * fader_4_5 + in4 * fader_4_7;
+            // accumulators
+            let mut out1 = 0.0;
+            // add in current sample
+            self.in1_left_buf[buf_pos] = *in1;
+            // move to back of queue.
+            buf_pos = (buf_pos + 1) % self.low_filter.len();
+            // iter through coeffs and multiply input by them
+            for (low_coeff, mid_coeff, high_coeff) in izip!(
+                self.low_filter.iter(),
+                self.mid_filter.iter(),
+                self.high_filter.iter()
+            ) {
+                let sample = self.in1_left_buf[buf_pos];
+                out1 += low_coeff * sample * self.state.fader_3_1 as f32
+                    + mid_coeff * sample * self.state.fader_2_1 as f32
+                    + high_coeff * sample * self.state.fader_1_1 as f32;
+                buf_pos = (buf_pos + 1) % self.low_filter.len();
+            }
+            // assemble out value
+            *out = out1 * fader_4_1 + in2 * fader_4_3 + in3 * fader_4_5 + in4 * fader_4_7;
         }
 
         // right
@@ -178,7 +236,25 @@ impl ProcessHandler for Ports {
             in3_right.iter(),
             in4_right.iter()
         ) {
-            *out = in1 * fader_4_2 + in2 * fader_4_4 + in3 * fader_4_6 + in4 * fader_4_8;
+            // accumulators
+            let mut out1 = 0.0;
+            // add in current sample
+            self.in1_right_buf[self.buf_position] = *in1;
+            // move to back of queue.
+            self.buf_position = (self.buf_position + 1) % self.low_filter.len();
+            // iter through coeffs and multiply input by them
+            for (low_coeff, mid_coeff, high_coeff) in izip!(
+                self.low_filter.iter(),
+                self.mid_filter.iter(),
+                self.high_filter.iter()
+            ) {
+                let sample = self.in1_right_buf[self.buf_position];
+                out1 += low_coeff * sample * self.state.fader_3_2 as f32
+                    + mid_coeff * sample * self.state.fader_2_2 as f32
+                    + high_coeff * sample * self.state.fader_1_2 as f32;
+                self.buf_position = (self.buf_position + 1) % self.low_filter.len();
+            }
+            *out = out1 * fader_4_2 + in2 * fader_4_4 + in3 * fader_4_6 + in4 * fader_4_8;
         }
 
         if shutdown {
@@ -227,6 +303,69 @@ fn convert_midi(evt: Event) -> Option<Msg> {
         Event::Fader4_8(v) => Msg::fader_4_8(v as f64),
         _ => return None,
     })
+}
+
+fn compute_lowpass_filter(cutoff: f32, sample_freq: f32, n: usize) -> Vec<f32> {
+    assert!(n % 2 != 0, "n must be odd");
+    let mut out = vec![0.0; n];
+
+    let cutoff = cutoff / sample_freq;
+    let angular_cutoff = 2.0 * PI * cutoff;
+    let middle = (n / 2) as isize; // drop remainder
+
+    for i in -middle..=middle {
+        if i == 0 {
+            out[middle as usize] = 2.0 * cutoff;
+        } else {
+            out[(i + middle) as usize] = (angular_cutoff * i as f32).sin() / (PI * i as f32);
+        }
+    }
+    out
+}
+
+fn compute_bandpass_filter(
+    low_cutoff: f32,
+    high_cutoff: f32,
+    sample_freq: f32,
+    n: usize,
+) -> Vec<f32> {
+    assert!(n % 2 != 0, "n must be odd");
+    let mut out = vec![0.0; n];
+
+    let low_cutoff = low_cutoff / sample_freq;
+    let high_cutoff = high_cutoff / sample_freq;
+    let low_angular = low_cutoff * 2.0 * PI;
+    let high_angular = high_cutoff * 2.0 * PI;
+    let middle = (n / 2) as isize;
+
+    for i in -middle..=middle {
+        if i == 0 {
+            out[middle as usize] = 1.0 - 2.0 * (high_cutoff - low_cutoff);
+        } else {
+            let i_f = i as f32;
+            out[(middle + i) as usize] =
+                (high_angular * i_f).sin() / (PI * i_f) - (low_angular * i_f).sin() / (PI * i_f);
+        }
+    }
+    out
+}
+
+fn compute_highpass_filter(cutoff: f32, sample_freq: f32, n: usize) -> Vec<f32> {
+    assert!(n % 2 != 0, "n must be odd");
+    let mut out = vec![0.0; n];
+
+    let cutoff = cutoff / sample_freq;
+    let angular_cutoff = 2.0 * PI * cutoff;
+    let middle = (n / 2) as isize; // drop remainder
+
+    for i in -middle..=middle {
+        if i == 0 {
+            out[middle as usize] = 1.0 - 2.0 * cutoff;
+        } else {
+            out[(i + middle) as usize] = -(angular_cutoff * i as f32).sin() / (PI * i as f32);
+        }
+    }
+    out
 }
 
 // boilerplate
