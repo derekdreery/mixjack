@@ -1,9 +1,9 @@
-A simple volume widget for jack audio.
+A simple mixer to allow me to use my midi controller (Novation LaunchControl XL) on linux and also to explore the new druid ui.
 
-You can see what command line options there are by running `jack-volume -h`.
+This app requires jack, but the midi support is optional.
 
-You'll need fairly recent `gtk` libraries, and the jack client library of course.
+# TODO
 
-There are 3 ways to update the volume: via the command line, a gtk interface, or a midi controller.
-
-The project is (IMHO) well documented, and also feel free to open issues to ask questions.
+ - The filters for the knobs (low, mid, high). Use convoluation filters.
+ - Learn how to write convoluation filters and use them in realtime threads.
+ - UI improvements.
