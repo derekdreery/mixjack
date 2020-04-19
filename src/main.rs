@@ -1,197 +1,232 @@
 mod cli;
+mod data;
 mod gui;
 
+use crossbeam_channel as channel;
+use itertools::izip;
 use jack::{AudioIn, AudioOut, Client, Control, MidiIn, Port, ProcessHandler, ProcessScope};
-use nom_midi::{MidiEvent, MidiEventType};
-use std::{
-    error::Error as StdError,
-    io::{self, BufRead},
-    str::FromStr,
-    sync::atomic::{AtomicI8, Ordering},
-};
+use novation_launch_control::Event;
 use structopt::StructOpt;
 
 use crate::cli::Opt;
 
-/// I'm using i8 because it is what's used in MIDI.
-///
-/// Actually, in MIDI i8 and u8 are the same because you never use the top bit (at least for
-/// controller amounts).
-static VOLUME: AtomicI8 = AtomicI8::new(127);
-/// So I don't have to click so often
-const VOL_MULTIPLIER: i8 = 3;
+type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
+pub use data::{Msg, State};
 
 /// Main programm runner.
-fn run(opts: Opt) -> Result<(), Box<dyn StdError>> {
-    // setup initial volume
-    let init_volume = (((opts.init_volume.0 as u32) * 127) / 100).min(127).max(0) as i8;
-    VOLUME.store(init_volume, Ordering::SeqCst);
-
+fn run(opts: Opt) -> Result {
     let (client, status) = Client::new(&opts.jack_name, jack::ClientOptions::NO_START_SERVER)?;
     log::info!("client status: {:?}", status);
     log::info!("sample rate: {}", client.sample_rate());
     log::info!("cpu_load: {}", client.cpu_load());
     log::info!("name: {}", client.name());
     log::info!("buffer size: {}", client.buffer_size());
-    if let Some(midi_conf) = opts.midi {
-        log::info!(
-            "receiving midi controller events on channel {}, control number {}",
-            midi_conf.channel,
-            midi_conf.controller
-        );
-    }
-    let ports = Ports::setup(&client, opts.midi)?;
-    let async_client = client.activate_async((), ports)?;
-    if opts.cli {
-        // loop waiting for commands and pass them to the realtime thread.
-        //
-        // You probably want to use the gui or the midi interface to alter the volume.
-        for line in io::stdin().lock().lines() {
-            let msg = match Msg::from_str(&line?) {
-                Ok(msg) => msg,
-                Err(e) => {
-                    log::error!("{}", e);
-                    continue;
-                }
-            };
-            change_volume(msg);
-        }
-    } else {
-        gui::run_gtk(async_client.as_client().name());
-    }
-    Ok(())
-}
 
-/// This method sets the global volume by incrementing or decrementing it based on the message.
-///
-/// It also returns the new volume.
-fn change_volume(msg: Msg) -> i8 {
-    log::debug!("Got command {:?}", msg);
-    let old_volume = VOLUME.load(Ordering::Relaxed);
-    log::debug!("old volume: {}", old_volume);
-    let new_volume = match msg {
-        Msg::Up => old_volume.saturating_add(1 * VOL_MULTIPLIER),
-        Msg::Down => old_volume.saturating_sub(1 * VOL_MULTIPLIER).max(0),
-    };
-    VOLUME.compare_and_swap(old_volume, new_volume, Ordering::AcqRel);
-    debug_assert_eq!(new_volume, VOLUME.load(Ordering::SeqCst));
-    log::debug!("new volume: {}", new_volume);
-    new_volume
+    // a channel for sending updates to the RT thread.
+    let (tx_ui, rx_rt) = channel::bounded(1024);
+    // a channel for sending updates from the RT thread to the gui.
+    let (tx_rt, rx_ui) = channel::bounded(1024);
+    // a channel for finding out when the ui has shut down.
+    let (shutdown_tx, shutdown_rx) = channel::bounded(0);
+
+    let ports = Ports::setup(&client, tx_rt, rx_rt)?;
+    // todo look at shutting down gracefully, whether that is necessary
+    let _async_client = client.activate_async((), ports)?;
+
+    let (evt_sink, ui_handle) = gui::run(tx_ui, shutdown_tx)?;
+    loop {
+        channel::select! {
+            recv(rx_ui) -> msg => {
+                // translate from non-blocking crossbeam::Channel to blocking to ExtEventSink
+                let msg = msg?; // There should never be an error here.
+                evt_sink.submit_command(gui::UPDATE, msg, None)?;
+            }
+            recv(shutdown_rx) -> res => {
+                // There should never be an error here.
+                let _ = res?;
+                break
+            }
+        }
+    }
+    ui_handle.join().unwrap()?;
+    Ok(())
 }
 
 /// This structure holds all the info we need to process the audio/midi signals in the realtime
 /// thread.
-///
-/// It consists of the 4 audio ports (it's hard-coded for stereo duplex RN), and optionally a midi
-/// port/controller number for midi control.
 struct Ports {
-    in_left: Port<AudioIn>,
-    in_right: Port<AudioIn>,
+    in1_left: Port<AudioIn>,
+    in1_right: Port<AudioIn>,
+    in2_left: Port<AudioIn>,
+    in2_right: Port<AudioIn>,
+    in3_left: Port<AudioIn>,
+    in3_right: Port<AudioIn>,
+    in4_left: Port<AudioIn>,
+    in4_right: Port<AudioIn>,
     out_left: Port<AudioOut>,
     out_right: Port<AudioOut>,
-    /// If we are using midi, the configuration for it and the port.
-    ///
-    /// We wrap these both in the option, as it is the best way to express in the type system that
-    /// they are either both present or both absent. If we didn't do this, we'd need to use
-    /// `unreaps`.
-    control_in: Option<(cli::MidiConf, Port<MidiIn>)>,
+    control_in: Port<MidiIn>,
+    ui_in: channel::Receiver<Msg>,
+    ui_out: channel::Sender<Msg>,
+    state: State,
 }
 
 impl Ports {
     /// Our constructor. Here we setup the ports we want and store them in our jack state object.
-    fn setup(client: &Client, midi: Option<cli::MidiConf>) -> Result<Self, Box<dyn StdError>> {
-        let in_left = client.register_port("in_left", AudioIn)?;
-        let in_right = client.register_port("in_right", AudioIn)?;
+    fn setup(
+        client: &Client,
+        tx: channel::Sender<Msg>,
+        rx: channel::Receiver<Msg>,
+    ) -> Result<Ports> {
+        let in1_left = client.register_port("in_1l", AudioIn)?;
+        let in1_right = client.register_port("in_1r", AudioIn)?;
+        let in2_left = client.register_port("in_2l", AudioIn)?;
+        let in2_right = client.register_port("in_2r", AudioIn)?;
+        let in3_left = client.register_port("in_3l", AudioIn)?;
+        let in3_right = client.register_port("in_3r", AudioIn)?;
+        let in4_left = client.register_port("in_4l", AudioIn)?;
+        let in4_right = client.register_port("in_4r", AudioIn)?;
         let out_left = client.register_port("out_left", AudioOut)?;
         let out_right = client.register_port("out_right", AudioOut)?;
-        let control_in = match midi {
-            Some(conf) => Some((conf, client.register_port("control_in", MidiIn)?)),
-            None => None,
-        };
+        let control_in = client.register_port("novation_SCXL_in", MidiIn)?;
 
         Ok(Ports {
-            in_left,
-            in_right,
+            in1_left,
+            in1_right,
+            in2_left,
+            in2_right,
+            in3_left,
+            in3_right,
+            in4_left,
+            in4_right,
             out_left,
             out_right,
             control_in,
+            ui_out: tx,
+            ui_in: rx,
+            state: State::default(),
         })
     }
 }
 
 impl ProcessHandler for Ports {
     fn process(&mut self, _client: &Client, process_scope: &ProcessScope) -> Control {
+        use channel::TryRecvError;
+
+        let mut shutdown = false;
         // process control events
-        if let Some((midi_conf, ref port)) = self.control_in {
-            for raw_midi in port.iter(process_scope) {
-                match nom_midi::parser::parse_midi_event(raw_midi.bytes) {
-                    Ok((
-                        _,
-                        MidiEvent {
-                            channel,
-                            event: MidiEventType::Controller(ctrl_no, amt),
-                        },
-                    )) if channel == midi_conf.channel && ctrl_no == midi_conf.controller => {
-                        // We don't really care how long it takes for other threads to see this
-                        // change. Usually, if you're using the midi interface you probably aren't
-                        // using any other, and even if you are, the results won't really matter (a
-                        // slightly different volume until you change the midi controller again).
-                        VOLUME.store(amt as i8, Ordering::Relaxed)
+        for raw_midi in self.control_in.iter(process_scope) {
+            if let Some(evt) = Event::parse(raw_midi.bytes) {
+                if let Some(msg) = convert_midi(evt) {
+                    self.state.update(msg);
+                    if let Err(e) = self.ui_out.send(msg) {
+                        println!("Error communicating with ui: {}", e);
+                        shutdown = true;
                     }
-                    _ => (), // do nothing for all other midi events
                 }
             }
         }
-        // process audio
-        //
-        // Here we copy it first and then operate on it, since maybe this aids cache performance. I
-        // haven't benchmarked though so I might be making it slower. I also want to investigate
-        // whether using simd would be quicker, or whether LLVM does this for me already.
-        let volume = convert_volume(VOLUME.load(Ordering::Relaxed));
+        loop {
+            match self.ui_in.try_recv() {
+                Ok(msg) => {
+                    self.state.update(msg);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    shutdown = true;
+                    break;
+                }
+            }
+        }
+
+        // get params
+        let fader_4_1 = self.state.fader_4_1 as f32;
+        let fader_4_2 = self.state.fader_4_2 as f32;
+        let fader_4_3 = self.state.fader_4_3 as f32;
+        let fader_4_4 = self.state.fader_4_4 as f32;
+        let fader_4_5 = self.state.fader_4_5 as f32;
+        let fader_4_6 = self.state.fader_4_6 as f32;
+        let fader_4_7 = self.state.fader_4_7 as f32;
+        let fader_4_8 = self.state.fader_4_8 as f32;
+
+        // left
         let out_left = self.out_left.as_mut_slice(process_scope);
-        out_left.copy_from_slice(self.in_left.as_slice(process_scope));
-        for val in out_left.iter_mut() {
-            (*val) *= volume;
+        let in1_left = self.in1_left.as_slice(process_scope);
+        let in2_left = self.in2_left.as_slice(process_scope);
+        let in3_left = self.in3_left.as_slice(process_scope);
+        let in4_left = self.in4_left.as_slice(process_scope);
+        for (out, in1, in2, in3, in4) in izip!(
+            out_left.iter_mut(),
+            in1_left.iter(),
+            in2_left.iter(),
+            in3_left.iter(),
+            in4_left.iter()
+        ) {
+            *out = in1 * fader_4_1 + in2 * fader_4_3 + in3 * fader_4_5 + in4 * fader_4_7;
         }
+
+        // right
         let out_right = self.out_right.as_mut_slice(process_scope);
-        out_right.copy_from_slice(self.in_right.as_slice(process_scope));
-        for val in out_right.iter_mut() {
-            (*val) *= volume;
+        let in1_right = self.in1_right.as_slice(process_scope);
+        let in2_right = self.in2_right.as_slice(process_scope);
+        let in3_right = self.in3_right.as_slice(process_scope);
+        let in4_right = self.in4_right.as_slice(process_scope);
+        for (out, in1, in2, in3, in4) in izip!(
+            out_right.iter_mut(),
+            in1_right.iter(),
+            in2_right.iter(),
+            in3_right.iter(),
+            in4_right.iter()
+        ) {
+            *out = in1 * fader_4_2 + in2 * fader_4_4 + in3 * fader_4_6 + in4 * fader_4_8;
         }
-        Control::Continue
-    }
-}
 
-/// We want to either increment or decrement the volume
-#[derive(Debug, Clone)]
-pub enum Msg {
-    /// Volume up
-    Up,
-    /// Volume down
-    Down,
-}
-
-impl FromStr for Msg {
-    type Err = &'static str;
-
-    fn from_str(msg: &str) -> Result<Self, Self::Err> {
-        if msg.eq_ignore_ascii_case("up") {
-            Ok(Msg::Up)
-        } else if msg.eq_ignore_ascii_case("down") {
-            Ok(Msg::Down)
+        if shutdown {
+            Control::Quit
         } else {
-            Err("unrecognised command")
+            Control::Continue
         }
     }
 }
 
-/// Convert an i8 volume into a f32 volume
-fn convert_volume(volume: i8) -> f32 {
-    //log::trace!("volume in i8: {}", volume);
-    debug_assert!(volume >= 0);
-    let volume = ((volume as f32) / 127.0).max(0.0).min(1.0);
-    //log::trace!("volume in f32: {}", volume);
-    volume
+// utils
+
+fn convert_midi(evt: Event) -> Option<Msg> {
+    Some(match evt {
+        Event::Fader1_1(v) => Msg::fader_1_1(v as f64),
+        Event::Fader1_2(v) => Msg::fader_1_2(v as f64),
+        Event::Fader1_3(v) => Msg::fader_1_3(v as f64),
+        Event::Fader1_4(v) => Msg::fader_1_4(v as f64),
+        Event::Fader1_5(v) => Msg::fader_1_5(v as f64),
+        Event::Fader1_6(v) => Msg::fader_1_6(v as f64),
+        Event::Fader1_7(v) => Msg::fader_1_7(v as f64),
+        Event::Fader1_8(v) => Msg::fader_1_8(v as f64),
+        Event::Fader2_1(v) => Msg::fader_2_1(v as f64),
+        Event::Fader2_2(v) => Msg::fader_2_2(v as f64),
+        Event::Fader2_3(v) => Msg::fader_2_3(v as f64),
+        Event::Fader2_4(v) => Msg::fader_2_4(v as f64),
+        Event::Fader2_5(v) => Msg::fader_2_5(v as f64),
+        Event::Fader2_6(v) => Msg::fader_2_6(v as f64),
+        Event::Fader2_7(v) => Msg::fader_2_7(v as f64),
+        Event::Fader2_8(v) => Msg::fader_2_8(v as f64),
+        Event::Fader3_1(v) => Msg::fader_3_1(v as f64),
+        Event::Fader3_2(v) => Msg::fader_3_2(v as f64),
+        Event::Fader3_3(v) => Msg::fader_3_3(v as f64),
+        Event::Fader3_4(v) => Msg::fader_3_4(v as f64),
+        Event::Fader3_5(v) => Msg::fader_3_5(v as f64),
+        Event::Fader3_6(v) => Msg::fader_3_6(v as f64),
+        Event::Fader3_7(v) => Msg::fader_3_7(v as f64),
+        Event::Fader3_8(v) => Msg::fader_3_8(v as f64),
+        Event::Fader4_1(v) => Msg::fader_4_1(v as f64),
+        Event::Fader4_2(v) => Msg::fader_4_2(v as f64),
+        Event::Fader4_3(v) => Msg::fader_4_3(v as f64),
+        Event::Fader4_4(v) => Msg::fader_4_4(v as f64),
+        Event::Fader4_5(v) => Msg::fader_4_5(v as f64),
+        Event::Fader4_6(v) => Msg::fader_4_6(v as f64),
+        Event::Fader4_7(v) => Msg::fader_4_7(v as f64),
+        Event::Fader4_8(v) => Msg::fader_4_8(v as f64),
+        _ => return None,
+    })
 }
 
 // boilerplate
@@ -203,10 +238,8 @@ fn main() {
     setup_logger(opts.verbosity);
     if let Err(err) = run(opts) {
         log::error!("{}", err);
-        let mut e = &*err;
-        while let Some(err) = e.source() {
-            log::error!("caused by {}", err);
-            e = err;
+        for e in err.chain().skip(1) {
+            log::error!("caused by {}", e);
         }
     }
 }

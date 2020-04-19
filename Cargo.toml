@@ -1,20 +1,27 @@
 [package]
-name = "jack-volume"
+name = "jack-mixer"
 version = "0.1.0"
 authors = ["Richard Dodd <richard.o.dodd@gmail.com>"]
 edition = "2018"
+description = """
+A simple mixer for jack using druid ui library. Also supports midi from LaunchControlXL
+"""
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-jack = { path = "../rust-jack" }
 log = "0.4.6"
 pretty_env_logger = "0.3.0"
 structopt = "0.2.18"
 crossbeam-channel = "0.3.8"
-num = "0.2.0"
-gtk = { version = "0.7.0", features = ["v3_16"] }
-gio = { version = "0.7.0", features = ["v2_44"] }
-gdk = "0.11.0"
-nom-midi = "0.5.0"
-nom = "5.0.0"
+jack = "0.6.2"
+druid = { git = "https://github.com/xi-editor/druid.git", branch = "master" }
+novation_launch_control = { path = "./novation_launch_control" }
+anyhow = "1.0.28"
+itertools = "0.9.0"
+
+[workspace]
+members = [
+    ".",
+    "novation_launch_control"
+    ]
