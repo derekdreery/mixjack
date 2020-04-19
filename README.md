@@ -1,6 +1,10 @@
 A simple mixer to allow me to use my midi controller (Novation LaunchControl XL) on linux and also to explore the new druid ui.
 
-This app requires jack, but the midi support is optional.
+This app requires jack, but the midi support is optional. The eq doesn't work yet, but the faders for volume do!
+
+# Screenshot
+
+![a screenshot](./screenshot.png)
 
 # TODO
 
