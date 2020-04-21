@@ -18,7 +18,6 @@ jack = "0.6.2"
 druid = { git = "https://github.com/xi-editor/druid.git", branch = "master" }
 novation_launch_control = { path = "./novation_launch_control" }
 anyhow = "1.0.28"
-itertools = "0.9.0"
 
 [workspace]
 members = [
