@@ -1,10 +1,15 @@
 [package]
 name = "novation_launch_control"
-description = "driver for the Novation LaunchControl XL"
+description = """ Conversion between raw midi event and more descriptive types for the Novation LaunchControl XL.
+Completely unofficial and not affiliated in any way.
+"""
 version = "0.1.0"
 authors = ["Richard Dodd <richard.o.dodd@gmail.com>"]
 edition = "2018"
+repository = "https://github.com/derekdreery/jack-mixer"
+license = "MIT OR Apache-2.0"
+keywords = ["novation", "launchcontrol", "midi"]
+categories = ["multimedia::audio"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies]

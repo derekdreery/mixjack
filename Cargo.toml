@@ -6,7 +6,10 @@ edition = "2018"
 description = """
 A simple mixer for jack using druid ui library. Also supports midi from LaunchControlXL
 """
-
+repository = "https://github.com/derekdreery/jack-mixer"
+license = "MIT OR Apache-2.0"
+keywords = ["jack", "mixer", "equalizer", "3-band"]
+categories = ["multimedia::audio"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -15,8 +18,8 @@ pretty_env_logger = "0.3.0"
 structopt = "0.2.18"
 crossbeam-channel = "0.3.8"
 jack = "0.6.2"
-druid = { git = "https://github.com/xi-editor/druid.git", branch = "master" }
-novation_launch_control = { path = "./novation_launch_control" }
+druid = "0.5"
+novation_launch_control = { version = "0.1", path = "./novation_launch_control" }
 anyhow = "1.0.28"
 
 [workspace]

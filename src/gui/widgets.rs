@@ -55,8 +55,7 @@ impl Widget<State> for App {
         new_data: &State,
         env: &Env,
     ) -> Size {
-        self.inner
-            .set_layout_rect(ctx, new_data, env, bc.max().to_rect());
+        self.inner.set_layout_rect(bc.max().to_rect());
         self.inner.layout(ctx, bc, new_data, env)
     }
 
@@ -113,7 +112,7 @@ impl Widget<f64> for Knob {
                     widget_val: *data,
                 });
             }
-            Event::MouseMove(MouseEvent {
+            Event::MouseMoved(MouseEvent {
                 button: MouseButton::Left,
                 window_pos,
                 ..
@@ -221,7 +220,7 @@ impl Widget<f64> for Fader {
                     widget_val: *data,
                 });
             }
-            Event::MouseMove(MouseEvent {
+            Event::MouseMoved(MouseEvent {
                 button: MouseButton::Left,
                 window_pos,
                 ..
