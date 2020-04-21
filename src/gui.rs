@@ -4,9 +4,9 @@ use crate::{
 };
 use crossbeam_channel as channel;
 use druid::{
-    widget::{prelude::*, Flex, MainAxisAlignment},
-    AppDelegate, AppLauncher, Color, Command, DelegateCtx, ExtEventSink, LocalizedString, Selector,
-    Target, Widget, WidgetExt, WindowDesc,
+    widget::{prelude::*, Flex, Label, MainAxisAlignment, Switch},
+    AppDelegate, AppLauncher, Color, Command, Data, DelegateCtx, ExtEventSink, Lens, LensExt,
+    LocalizedString, Selector, Target, Widget, WidgetExt, WindowDesc,
 };
 use std::thread::{self, JoinHandle};
 
@@ -48,6 +48,19 @@ fn build_ui(tx: channel::Sender<Msg>) -> impl Widget<State> {
                 Flex::row()
                     .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
                     .must_fill_main_axis(true)
+                    .with_child(label_fixed_width("in_1l"))
+                    .with_child(label_fixed_width("in_1r"))
+                    .with_child(label_fixed_width("in_2l"))
+                    .with_child(label_fixed_width("in_2r"))
+                    .with_child(label_fixed_width("in_3l"))
+                    .with_child(label_fixed_width("in_3r"))
+                    .with_child(label_fixed_width("in_4l"))
+                    .with_child(label_fixed_width("in_4r")),
+            )
+            .with_child(
+                Flex::row()
+                    .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
+                    .must_fill_main_axis(true)
                     .with_child(red_fader.clone().lens(State::fader_1_1))
                     .with_child(red_fader.clone().lens(State::fader_1_2))
                     .with_child(yellow_fader.clone().lens(State::fader_1_3))
@@ -82,6 +95,19 @@ fn build_ui(tx: channel::Sender<Msg>) -> impl Widget<State> {
                     .with_child(green_fader.clone().lens(State::fader_3_6))
                     .with_child(orange_fader.clone().lens(State::fader_3_7))
                     .with_child(orange_fader.clone().lens(State::fader_3_8)),
+            )
+            .with_child(
+                Flex::row()
+                    .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
+                    .must_fill_main_axis(true)
+                    .with_child(switch().lens(lens_not(State::filter_passthru_1)))
+                    .with_child(switch().lens(lens_not(State::filter_passthru_2)))
+                    .with_child(switch().lens(lens_not(State::filter_passthru_3)))
+                    .with_child(switch().lens(lens_not(State::filter_passthru_4)))
+                    .with_child(switch().lens(lens_not(State::filter_passthru_5)))
+                    .with_child(switch().lens(lens_not(State::filter_passthru_6)))
+                    .with_child(switch().lens(lens_not(State::filter_passthru_7)))
+                    .with_child(switch().lens(lens_not(State::filter_passthru_8))),
             )
             .with_child(
                 Flex::row()
@@ -144,4 +170,18 @@ pub fn run(
     });
     let evt_sink = oneshot_rx.recv().unwrap();
     Ok((evt_sink, ui_handle))
+}
+
+// util
+
+fn lens_not<A>(input: impl Lens<A, bool>) -> impl Lens<A, bool> {
+    input.map(|v| !v, |data, value| *data = !value)
+}
+
+fn label_fixed_width<T: Data>(label: &str) -> impl Widget<T> {
+    Label::new(label).center().fix_width(50.0)
+}
+
+fn switch() -> impl Widget<bool> {
+    Switch::new().center()
 }

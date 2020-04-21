@@ -36,6 +36,14 @@ pub struct State {
     pub fader_4_6: f64,
     pub fader_4_7: f64,
     pub fader_4_8: f64,
+    pub filter_passthru_1: bool,
+    pub filter_passthru_2: bool,
+    pub filter_passthru_3: bool,
+    pub filter_passthru_4: bool,
+    pub filter_passthru_5: bool,
+    pub filter_passthru_6: bool,
+    pub filter_passthru_7: bool,
+    pub filter_passthru_8: bool,
 }
 
 impl State {
@@ -297,6 +305,70 @@ impl State {
                     false
                 }
             }
+            Msg::filter_passthru_1(v) => {
+                if self.filter_passthru_1 != v {
+                    self.filter_passthru_1 = v;
+                    true
+                } else {
+                    false
+                }
+            }
+            Msg::filter_passthru_2(v) => {
+                if self.filter_passthru_2 != v {
+                    self.filter_passthru_2 = v;
+                    true
+                } else {
+                    false
+                }
+            }
+            Msg::filter_passthru_3(v) => {
+                if self.filter_passthru_3 != v {
+                    self.filter_passthru_3 = v;
+                    true
+                } else {
+                    false
+                }
+            }
+            Msg::filter_passthru_4(v) => {
+                if self.filter_passthru_4 != v {
+                    self.filter_passthru_4 = v;
+                    true
+                } else {
+                    false
+                }
+            }
+            Msg::filter_passthru_5(v) => {
+                if self.filter_passthru_5 != v {
+                    self.filter_passthru_5 = v;
+                    true
+                } else {
+                    false
+                }
+            }
+            Msg::filter_passthru_6(v) => {
+                if self.filter_passthru_6 != v {
+                    self.filter_passthru_6 = v;
+                    true
+                } else {
+                    false
+                }
+            }
+            Msg::filter_passthru_7(v) => {
+                if self.filter_passthru_7 != v {
+                    self.filter_passthru_7 = v;
+                    true
+                } else {
+                    false
+                }
+            }
+            Msg::filter_passthru_8(v) => {
+                if self.filter_passthru_8 != v {
+                    self.filter_passthru_8 = v;
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 
@@ -397,6 +469,30 @@ impl State {
         if self.fader_4_8 != prev.fader_4_8 {
             sender.send(Msg::fader_4_8(self.fader_4_8))?;
         }
+        if self.filter_passthru_1 != prev.filter_passthru_1 {
+            sender.send(Msg::filter_passthru_1(self.filter_passthru_1))?;
+        }
+        if self.filter_passthru_2 != prev.filter_passthru_2 {
+            sender.send(Msg::filter_passthru_2(self.filter_passthru_2))?;
+        }
+        if self.filter_passthru_3 != prev.filter_passthru_3 {
+            sender.send(Msg::filter_passthru_3(self.filter_passthru_3))?;
+        }
+        if self.filter_passthru_4 != prev.filter_passthru_4 {
+            sender.send(Msg::filter_passthru_4(self.filter_passthru_4))?;
+        }
+        if self.filter_passthru_5 != prev.filter_passthru_5 {
+            sender.send(Msg::filter_passthru_5(self.filter_passthru_5))?;
+        }
+        if self.filter_passthru_6 != prev.filter_passthru_6 {
+            sender.send(Msg::filter_passthru_6(self.filter_passthru_6))?;
+        }
+        if self.filter_passthru_7 != prev.filter_passthru_7 {
+            sender.send(Msg::filter_passthru_7(self.filter_passthru_7))?;
+        }
+        if self.filter_passthru_8 != prev.filter_passthru_8 {
+            sender.send(Msg::filter_passthru_8(self.filter_passthru_8))?;
+        }
         Ok(())
     }
 }
@@ -438,6 +534,15 @@ impl Default for State {
             fader_4_6: 0.0,
             fader_4_7: 0.0,
             fader_4_8: 0.0,
+            // passthru
+            filter_passthru_1: true,
+            filter_passthru_2: true,
+            filter_passthru_3: true,
+            filter_passthru_4: true,
+            filter_passthru_5: true,
+            filter_passthru_6: true,
+            filter_passthru_7: true,
+            filter_passthru_8: true,
         }
     }
 }
@@ -477,4 +582,12 @@ pub enum Msg {
     fader_4_6(f64),
     fader_4_7(f64),
     fader_4_8(f64),
+    filter_passthru_1(bool),
+    filter_passthru_2(bool),
+    filter_passthru_3(bool),
+    filter_passthru_4(bool),
+    filter_passthru_5(bool),
+    filter_passthru_6(bool),
+    filter_passthru_7(bool),
+    filter_passthru_8(bool),
 }

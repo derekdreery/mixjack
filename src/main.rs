@@ -1,18 +1,24 @@
 mod cli;
 mod data;
+mod effects;
 mod gui;
+mod ports;
 
 use crossbeam_channel as channel;
-use itertools::izip;
-use jack::{AudioIn, AudioOut, Client, Control, MidiIn, Port, ProcessHandler, ProcessScope};
-use novation_launch_control::Event;
-use std::{f32::consts::PI, iter};
+use jack::Client;
 use structopt::StructOpt;
 
-use crate::cli::Opt;
+use crate::{
+    cli::Opt,
+    data::{Msg, State},
+    ports::Ports,
+};
 
 type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
-pub use data::{Msg, State};
+
+const LOW_CUTOFF: f32 = 200.0;
+const HIGH_CUTOFF: f32 = 2000.0;
+const FILTER_LENGTH: usize = 21;
 
 /// Main programm runner.
 fn run(opts: Opt) -> Result {
@@ -30,7 +36,14 @@ fn run(opts: Opt) -> Result {
     // a channel for finding out when the ui has shut down.
     let (shutdown_tx, shutdown_rx) = channel::bounded(0);
 
-    let ports = Ports::setup(&client, tx_rt, rx_rt, 200.0, 2000.0, 81)?;
+    let ports = Ports::setup(
+        &client,
+        tx_rt,
+        rx_rt,
+        LOW_CUTOFF,
+        HIGH_CUTOFF,
+        FILTER_LENGTH,
+    )?;
     // todo look at shutting down gracefully, whether that is necessary
     let _async_client = client.activate_async((), ports)?;
 
@@ -51,321 +64,6 @@ fn run(opts: Opt) -> Result {
     }
     ui_handle.join().unwrap()?;
     Ok(())
-}
-
-/// This structure holds all the info we need to process the audio/midi signals in the realtime
-/// thread.
-struct Ports {
-    in1_left: Port<AudioIn>,
-    in1_right: Port<AudioIn>,
-    in2_left: Port<AudioIn>,
-    in2_right: Port<AudioIn>,
-    in3_left: Port<AudioIn>,
-    in3_right: Port<AudioIn>,
-    in4_left: Port<AudioIn>,
-    in4_right: Port<AudioIn>,
-    out_left: Port<AudioOut>,
-    out_right: Port<AudioOut>,
-    control_in: Port<MidiIn>,
-    ui_in: channel::Receiver<Msg>,
-    ui_out: channel::Sender<Msg>,
-    state: State,
-    // filter coeffs
-    low_filter: Box<[f32]>,
-    mid_filter: Box<[f32]>,
-    high_filter: Box<[f32]>,
-    // filter buffers - used as ring buffers
-    in1_left_buf: Box<[f32]>,
-    in1_right_buf: Box<[f32]>,
-    // TODO the rest
-    buf_position: usize,
-}
-
-impl Ports {
-    /// Our constructor. Here we setup the ports we want and store them in our jack state object.
-    fn setup(
-        client: &Client,
-        tx: channel::Sender<Msg>,
-        rx: channel::Receiver<Msg>,
-        low_mid_freq: f32,
-        mid_high_freq: f32,
-        filter_length: usize,
-    ) -> Result<Ports> {
-        let in1_left = client.register_port("in_1l", AudioIn)?;
-        let in1_right = client.register_port("in_1r", AudioIn)?;
-        let in2_left = client.register_port("in_2l", AudioIn)?;
-        let in2_right = client.register_port("in_2r", AudioIn)?;
-        let in3_left = client.register_port("in_3l", AudioIn)?;
-        let in3_right = client.register_port("in_3r", AudioIn)?;
-        let in4_left = client.register_port("in_4l", AudioIn)?;
-        let in4_right = client.register_port("in_4r", AudioIn)?;
-
-        let out_left = client.register_port("out_left", AudioOut)?;
-        let out_right = client.register_port("out_right", AudioOut)?;
-
-        let control_in = client.register_port("novation_SCXL_in", MidiIn)?;
-
-        Ok(Ports {
-            in1_left,
-            in1_right,
-            in2_left,
-            in2_right,
-            in3_left,
-            in3_right,
-            in4_left,
-            in4_right,
-            out_left,
-            out_right,
-            control_in,
-            ui_out: tx,
-            ui_in: rx,
-            state: State::default(),
-            low_filter: compute_lowpass_filter(
-                low_mid_freq,
-                client.sample_rate() as f32,
-                filter_length,
-            )
-            .into_boxed_slice(),
-            mid_filter: compute_bandpass_filter(
-                low_mid_freq,
-                mid_high_freq,
-                client.sample_rate() as f32,
-                filter_length,
-            )
-            .into_boxed_slice(),
-            high_filter: compute_highpass_filter(
-                mid_high_freq,
-                client.sample_rate() as f32,
-                filter_length,
-            )
-            .into_boxed_slice(),
-            in1_left_buf: vec![0.0; filter_length].into_boxed_slice(),
-            in1_right_buf: vec![0.0; filter_length].into_boxed_slice(),
-            buf_position: 0,
-        })
-    }
-}
-
-impl ProcessHandler for Ports {
-    fn process(&mut self, _client: &Client, process_scope: &ProcessScope) -> Control {
-        use channel::TryRecvError;
-
-        let mut shutdown = false;
-        // process midi events
-        for raw_midi in self.control_in.iter(process_scope) {
-            if let Some(evt) = Event::parse(raw_midi.bytes) {
-                if let Some(msg) = convert_midi(evt) {
-                    self.state.update(msg);
-                    if let Err(e) = self.ui_out.send(msg) {
-                        println!("Error communicating with ui: {}", e);
-                        shutdown = true;
-                    }
-                }
-            }
-        }
-        // process ui events
-        loop {
-            match self.ui_in.try_recv() {
-                Ok(msg) => {
-                    self.state.update(msg);
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    shutdown = true;
-                    break;
-                }
-            }
-        }
-
-        // get params
-        let fader_4_1 = self.state.fader_4_1 as f32;
-        let fader_4_2 = self.state.fader_4_2 as f32;
-        let fader_4_3 = self.state.fader_4_3 as f32;
-        let fader_4_4 = self.state.fader_4_4 as f32;
-        let fader_4_5 = self.state.fader_4_5 as f32;
-        let fader_4_6 = self.state.fader_4_6 as f32;
-        let fader_4_7 = self.state.fader_4_7 as f32;
-        let fader_4_8 = self.state.fader_4_8 as f32;
-
-        // left
-        let out_left = self.out_left.as_mut_slice(process_scope);
-        let in1_left = self.in1_left.as_slice(process_scope);
-        let in2_left = self.in2_left.as_slice(process_scope);
-        let in3_left = self.in3_left.as_slice(process_scope);
-        let in4_left = self.in4_left.as_slice(process_scope);
-        let mut buf_pos = self.buf_position;
-        for (out, in1, in2, in3, in4) in izip!(
-            out_left.iter_mut(),
-            in1_left.iter(),
-            in2_left.iter(),
-            in3_left.iter(),
-            in4_left.iter()
-        ) {
-            // accumulators
-            let mut out1 = 0.0;
-            // add in current sample
-            self.in1_left_buf[buf_pos] = *in1;
-            // move to back of queue.
-            buf_pos = (buf_pos + 1) % self.low_filter.len();
-            // iter through coeffs and multiply input by them
-            for (low_coeff, mid_coeff, high_coeff) in izip!(
-                self.low_filter.iter(),
-                self.mid_filter.iter(),
-                self.high_filter.iter()
-            ) {
-                let sample = self.in1_left_buf[buf_pos];
-                out1 += low_coeff * sample * self.state.fader_3_1 as f32
-                    + mid_coeff * sample * self.state.fader_2_1 as f32
-                    + high_coeff * sample * self.state.fader_1_1 as f32;
-                buf_pos = (buf_pos + 1) % self.low_filter.len();
-            }
-            // assemble out value
-            *out = out1 * fader_4_1 + in2 * fader_4_3 + in3 * fader_4_5 + in4 * fader_4_7;
-        }
-
-        // right
-        let out_right = self.out_right.as_mut_slice(process_scope);
-        let in1_right = self.in1_right.as_slice(process_scope);
-        let in2_right = self.in2_right.as_slice(process_scope);
-        let in3_right = self.in3_right.as_slice(process_scope);
-        let in4_right = self.in4_right.as_slice(process_scope);
-        for (out, in1, in2, in3, in4) in izip!(
-            out_right.iter_mut(),
-            in1_right.iter(),
-            in2_right.iter(),
-            in3_right.iter(),
-            in4_right.iter()
-        ) {
-            // accumulators
-            let mut out1 = 0.0;
-            // add in current sample
-            self.in1_right_buf[self.buf_position] = *in1;
-            // move to back of queue.
-            self.buf_position = (self.buf_position + 1) % self.low_filter.len();
-            // iter through coeffs and multiply input by them
-            for (low_coeff, mid_coeff, high_coeff) in izip!(
-                self.low_filter.iter(),
-                self.mid_filter.iter(),
-                self.high_filter.iter()
-            ) {
-                let sample = self.in1_right_buf[self.buf_position];
-                out1 += low_coeff * sample * self.state.fader_3_2 as f32
-                    + mid_coeff * sample * self.state.fader_2_2 as f32
-                    + high_coeff * sample * self.state.fader_1_2 as f32;
-                self.buf_position = (self.buf_position + 1) % self.low_filter.len();
-            }
-            *out = out1 * fader_4_2 + in2 * fader_4_4 + in3 * fader_4_6 + in4 * fader_4_8;
-        }
-
-        if shutdown {
-            Control::Quit
-        } else {
-            Control::Continue
-        }
-    }
-}
-
-// utils
-
-fn convert_midi(evt: Event) -> Option<Msg> {
-    Some(match evt {
-        Event::Fader1_1(v) => Msg::fader_1_1(v as f64),
-        Event::Fader1_2(v) => Msg::fader_1_2(v as f64),
-        Event::Fader1_3(v) => Msg::fader_1_3(v as f64),
-        Event::Fader1_4(v) => Msg::fader_1_4(v as f64),
-        Event::Fader1_5(v) => Msg::fader_1_5(v as f64),
-        Event::Fader1_6(v) => Msg::fader_1_6(v as f64),
-        Event::Fader1_7(v) => Msg::fader_1_7(v as f64),
-        Event::Fader1_8(v) => Msg::fader_1_8(v as f64),
-        Event::Fader2_1(v) => Msg::fader_2_1(v as f64),
-        Event::Fader2_2(v) => Msg::fader_2_2(v as f64),
-        Event::Fader2_3(v) => Msg::fader_2_3(v as f64),
-        Event::Fader2_4(v) => Msg::fader_2_4(v as f64),
-        Event::Fader2_5(v) => Msg::fader_2_5(v as f64),
-        Event::Fader2_6(v) => Msg::fader_2_6(v as f64),
-        Event::Fader2_7(v) => Msg::fader_2_7(v as f64),
-        Event::Fader2_8(v) => Msg::fader_2_8(v as f64),
-        Event::Fader3_1(v) => Msg::fader_3_1(v as f64),
-        Event::Fader3_2(v) => Msg::fader_3_2(v as f64),
-        Event::Fader3_3(v) => Msg::fader_3_3(v as f64),
-        Event::Fader3_4(v) => Msg::fader_3_4(v as f64),
-        Event::Fader3_5(v) => Msg::fader_3_5(v as f64),
-        Event::Fader3_6(v) => Msg::fader_3_6(v as f64),
-        Event::Fader3_7(v) => Msg::fader_3_7(v as f64),
-        Event::Fader3_8(v) => Msg::fader_3_8(v as f64),
-        Event::Fader4_1(v) => Msg::fader_4_1(v as f64),
-        Event::Fader4_2(v) => Msg::fader_4_2(v as f64),
-        Event::Fader4_3(v) => Msg::fader_4_3(v as f64),
-        Event::Fader4_4(v) => Msg::fader_4_4(v as f64),
-        Event::Fader4_5(v) => Msg::fader_4_5(v as f64),
-        Event::Fader4_6(v) => Msg::fader_4_6(v as f64),
-        Event::Fader4_7(v) => Msg::fader_4_7(v as f64),
-        Event::Fader4_8(v) => Msg::fader_4_8(v as f64),
-        _ => return None,
-    })
-}
-
-fn compute_lowpass_filter(cutoff: f32, sample_freq: f32, n: usize) -> Vec<f32> {
-    assert!(n % 2 != 0, "n must be odd");
-    let mut out = vec![0.0; n];
-
-    let cutoff = cutoff / sample_freq;
-    let angular_cutoff = 2.0 * PI * cutoff;
-    let middle = (n / 2) as isize; // drop remainder
-
-    for i in -middle..=middle {
-        if i == 0 {
-            out[middle as usize] = 2.0 * cutoff;
-        } else {
-            out[(i + middle) as usize] = (angular_cutoff * i as f32).sin() / (PI * i as f32);
-        }
-    }
-    out
-}
-
-fn compute_bandpass_filter(
-    low_cutoff: f32,
-    high_cutoff: f32,
-    sample_freq: f32,
-    n: usize,
-) -> Vec<f32> {
-    assert!(n % 2 != 0, "n must be odd");
-    let mut out = vec![0.0; n];
-
-    let low_cutoff = low_cutoff / sample_freq;
-    let high_cutoff = high_cutoff / sample_freq;
-    let low_angular = low_cutoff * 2.0 * PI;
-    let high_angular = high_cutoff * 2.0 * PI;
-    let middle = (n / 2) as isize;
-
-    for i in -middle..=middle {
-        if i == 0 {
-            out[middle as usize] = 1.0 - 2.0 * (high_cutoff - low_cutoff);
-        } else {
-            let i_f = i as f32;
-            out[(middle + i) as usize] =
-                (high_angular * i_f).sin() / (PI * i_f) - (low_angular * i_f).sin() / (PI * i_f);
-        }
-    }
-    out
-}
-
-fn compute_highpass_filter(cutoff: f32, sample_freq: f32, n: usize) -> Vec<f32> {
-    assert!(n % 2 != 0, "n must be odd");
-    let mut out = vec![0.0; n];
-
-    let cutoff = cutoff / sample_freq;
-    let angular_cutoff = 2.0 * PI * cutoff;
-    let middle = (n / 2) as isize; // drop remainder
-
-    for i in -middle..=middle {
-        if i == 0 {
-            out[middle as usize] = 1.0 - 2.0 * cutoff;
-        } else {
-            out[(i + middle) as usize] = -(angular_cutoff * i as f32).sin() / (PI * i as f32);
-        }
-    }
-    out
 }
 
 // boilerplate
