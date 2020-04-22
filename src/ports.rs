@@ -3,12 +3,16 @@ use crate::{
     Msg, Result, State,
 };
 use crossbeam_channel as channel;
-use jack::{AudioIn, AudioOut, Client, Control, MidiIn, Port, ProcessHandler, ProcessScope};
-use novation_launch_control::Event;
+use jack::{
+    AudioIn, AudioOut, Client, Control, MidiIn, MidiOut, MidiWriter, Port, ProcessHandler,
+    ProcessScope,
+};
+use midi_event::{MidiEvent, Parse};
 
 /// This structure holds all the info we need to process the audio/midi signals in the realtime
 /// thread.
 pub struct Ports {
+    // audio ports
     in1_left: Port<AudioIn>,
     in1_right: Port<AudioIn>,
     in2_left: Port<AudioIn>,
@@ -19,11 +23,15 @@ pub struct Ports {
     in4_right: Port<AudioIn>,
     out_left: Port<AudioOut>,
     out_right: Port<AudioOut>,
+    // midi ports
     control_in: Port<MidiIn>,
+    control_out: Port<MidiOut>,
+
     ui_in: channel::Receiver<Msg>,
     ui_out: channel::Sender<Msg>,
+    // application state
     state: State,
-    // filter coeffs
+    // filter coeffs - fixed
     low_filter_1l: FIRFilter,
     mid_filter_1l: FIRFilter,
     high_filter_1l: FIRFilter,
@@ -48,7 +56,9 @@ pub struct Ports {
     low_filter_4r: FIRFilter,
     mid_filter_4r: FIRFilter,
     high_filter_4r: FIRFilter,
-    // TODO the rest
+
+    first_iter: bool,
+    novation_out: NovationOut,
 }
 
 impl Ports {
@@ -73,7 +83,8 @@ impl Ports {
         let out_left = client.register_port("out_left", AudioOut)?;
         let out_right = client.register_port("out_right", AudioOut)?;
 
-        let control_in = client.register_port("novation_SCXL_in", MidiIn)?;
+        let control_in = client.register_port("control_in", MidiIn)?;
+        let control_out = client.register_port("novation_SCXL_out", MidiOut)?;
 
         let low_pass =
             FIRFilter::low_pass(low_mid_freq, client.sample_rate() as f32, filter_length);
@@ -98,6 +109,7 @@ impl Ports {
             out_left,
             out_right,
             control_in,
+            control_out,
             ui_out: tx,
             ui_in: rx,
             state: State::default(),
@@ -125,6 +137,8 @@ impl Ports {
             low_filter_4r: low_pass.clone(),
             mid_filter_4r: band_pass.clone(),
             high_filter_4r: high_pass.clone(),
+            first_iter: true,
+            novation_out: NovationOut::new(),
         })
     }
 }
@@ -134,10 +148,28 @@ impl ProcessHandler for Ports {
         use channel::TryRecvError;
 
         let mut shutdown = false;
+
+        // reset the controller on the first cycle
+        let mut control_out = self.control_out.writer(process_scope);
+        if self.first_iter {
+            if let Err(e) = self.novation_out.reset(&mut control_out) {
+                println!("Error resetting LCXL state: {}", e);
+                shutdown = true;
+            }
+            self.first_iter = false;
+        }
+
         // process midi events
         for raw_midi in self.control_in.iter(process_scope) {
-            if let Some(evt) = Event::parse(raw_midi.bytes) {
-                if let Some(msg) = convert_midi(evt) {
+            if let Some(evt) = MidiEvent::parse(raw_midi.bytes) {
+                if let Some(msg) = convert_midi(evt, &self.state) {
+                    if let Err(e) = self
+                        .novation_out
+                        .handle_msg(&self.state, msg, &mut control_out)
+                    {
+                        println!("Error updating LCXL state: {}", e);
+                        shutdown = true;
+                    }
                     self.state.update(msg);
                     if let Err(e) = self.ui_out.send(msg) {
                         println!("Error communicating with ui: {}", e);
@@ -150,6 +182,13 @@ impl ProcessHandler for Ports {
         loop {
             match self.ui_in.try_recv() {
                 Ok(msg) => {
+                    if let Err(e) = self
+                        .novation_out
+                        .handle_msg(&self.state, msg, &mut control_out)
+                    {
+                        println!("Error updating LCXL state: {}", e);
+                        shutdown = true;
+                    }
                     self.state.update(msg);
                 }
                 Err(TryRecvError::Empty) => break,
@@ -345,40 +384,199 @@ impl ProcessHandler for Ports {
 
 // utils
 
-fn convert_midi(evt: Event) -> Option<Msg> {
-    Some(match evt {
-        Event::Fader1_1(v) => Msg::fader_1_1(v as f64),
-        Event::Fader1_2(v) => Msg::fader_1_2(v as f64),
-        Event::Fader1_3(v) => Msg::fader_1_3(v as f64),
-        Event::Fader1_4(v) => Msg::fader_1_4(v as f64),
-        Event::Fader1_5(v) => Msg::fader_1_5(v as f64),
-        Event::Fader1_6(v) => Msg::fader_1_6(v as f64),
-        Event::Fader1_7(v) => Msg::fader_1_7(v as f64),
-        Event::Fader1_8(v) => Msg::fader_1_8(v as f64),
-        Event::Fader2_1(v) => Msg::fader_2_1(v as f64),
-        Event::Fader2_2(v) => Msg::fader_2_2(v as f64),
-        Event::Fader2_3(v) => Msg::fader_2_3(v as f64),
-        Event::Fader2_4(v) => Msg::fader_2_4(v as f64),
-        Event::Fader2_5(v) => Msg::fader_2_5(v as f64),
-        Event::Fader2_6(v) => Msg::fader_2_6(v as f64),
-        Event::Fader2_7(v) => Msg::fader_2_7(v as f64),
-        Event::Fader2_8(v) => Msg::fader_2_8(v as f64),
-        Event::Fader3_1(v) => Msg::fader_3_1(v as f64),
-        Event::Fader3_2(v) => Msg::fader_3_2(v as f64),
-        Event::Fader3_3(v) => Msg::fader_3_3(v as f64),
-        Event::Fader3_4(v) => Msg::fader_3_4(v as f64),
-        Event::Fader3_5(v) => Msg::fader_3_5(v as f64),
-        Event::Fader3_6(v) => Msg::fader_3_6(v as f64),
-        Event::Fader3_7(v) => Msg::fader_3_7(v as f64),
-        Event::Fader3_8(v) => Msg::fader_3_8(v as f64),
-        Event::Fader4_1(v) => Msg::fader_4_1(v as f64),
-        Event::Fader4_2(v) => Msg::fader_4_2(v as f64),
-        Event::Fader4_3(v) => Msg::fader_4_3(v as f64),
-        Event::Fader4_4(v) => Msg::fader_4_4(v as f64),
-        Event::Fader4_5(v) => Msg::fader_4_5(v as f64),
-        Event::Fader4_6(v) => Msg::fader_4_6(v as f64),
-        Event::Fader4_7(v) => Msg::fader_4_7(v as f64),
-        Event::Fader4_8(v) => Msg::fader_4_8(v as f64),
+// for now mapping from novation soundcontrol xl factory settings 1
+fn convert_midi(evt: MidiEvent, state: &State) -> Option<Msg> {
+    use midi_event::{MidiEventType::*, Note::*};
+
+    Some(match evt.event {
+        Controller(0x0d, amt) => Msg::fader_1_1((amt as f64) / 127.0),
+        Controller(0x0e, amt) => Msg::fader_1_2((amt as f64) / 127.0),
+        Controller(0x0f, amt) => Msg::fader_1_3((amt as f64) / 127.0),
+        Controller(0x10, amt) => Msg::fader_1_4((amt as f64) / 127.0),
+        Controller(0x11, amt) => Msg::fader_1_5((amt as f64) / 127.0),
+        Controller(0x12, amt) => Msg::fader_1_6((amt as f64) / 127.0),
+        Controller(0x13, amt) => Msg::fader_1_7((amt as f64) / 127.0),
+        Controller(0x14, amt) => Msg::fader_1_8((amt as f64) / 127.0),
+
+        Controller(0x1d, amt) => Msg::fader_2_1((amt as f64) / 127.0),
+        Controller(0x1e, amt) => Msg::fader_2_2((amt as f64) / 127.0),
+        Controller(0x1f, amt) => Msg::fader_2_3((amt as f64) / 127.0),
+        Controller(0x20, amt) => Msg::fader_2_4((amt as f64) / 127.0),
+        Controller(0x21, amt) => Msg::fader_2_5((amt as f64) / 127.0),
+        Controller(0x22, amt) => Msg::fader_2_6((amt as f64) / 127.0),
+        Controller(0x23, amt) => Msg::fader_2_7((amt as f64) / 127.0),
+        Controller(0x24, amt) => Msg::fader_2_8((amt as f64) / 127.0),
+
+        Controller(0x31, amt) => Msg::fader_3_1((amt as f64) / 127.0),
+        Controller(0x32, amt) => Msg::fader_3_2((amt as f64) / 127.0),
+        Controller(0x33, amt) => Msg::fader_3_3((amt as f64) / 127.0),
+        Controller(0x34, amt) => Msg::fader_3_4((amt as f64) / 127.0),
+        Controller(0x35, amt) => Msg::fader_3_5((amt as f64) / 127.0),
+        Controller(0x36, amt) => Msg::fader_3_6((amt as f64) / 127.0),
+        Controller(0x37, amt) => Msg::fader_3_7((amt as f64) / 127.0),
+        Controller(0x38, amt) => Msg::fader_3_8((amt as f64) / 127.0),
+
+        Controller(0x4d, amt) => Msg::fader_4_1((amt as f64) / 127.0),
+        Controller(0x4e, amt) => Msg::fader_4_2((amt as f64) / 127.0),
+        Controller(0x4f, amt) => Msg::fader_4_3((amt as f64) / 127.0),
+        Controller(0x50, amt) => Msg::fader_4_4((amt as f64) / 127.0),
+        Controller(0x51, amt) => Msg::fader_4_5((amt as f64) / 127.0),
+        Controller(0x52, amt) => Msg::fader_4_6((amt as f64) / 127.0),
+        Controller(0x53, amt) => Msg::fader_4_7((amt as f64) / 127.0),
+        Controller(0x54, amt) => Msg::fader_4_8((amt as f64) / 127.0),
+
+        NoteOn(F2, _) => Msg::filter_passthru_1(!state.filter_passthru_1),
+        NoteOn(Fs2, _) => Msg::filter_passthru_2(!state.filter_passthru_2),
+        NoteOn(G2, _) => Msg::filter_passthru_3(!state.filter_passthru_3),
+        NoteOn(Gs2, _) => Msg::filter_passthru_4(!state.filter_passthru_4),
+        NoteOn(A3, _) => Msg::filter_passthru_5(!state.filter_passthru_5),
+        NoteOn(As3, _) => Msg::filter_passthru_6(!state.filter_passthru_6),
+        NoteOn(B3, _) => Msg::filter_passthru_7(!state.filter_passthru_7),
+        NoteOn(C4, _) => Msg::filter_passthru_8(!state.filter_passthru_8),
         _ => return None,
     })
+}
+
+pub struct NovationOut {
+    buf: [u8; 11],
+}
+
+impl NovationOut {
+    fn new() -> Self {
+        NovationOut {
+            buf: [
+                0xf0, 0x00, 0x20, 0x29, 0x02, 0x11, 0x78, 0x00, 0x00, 0x00, 0xf7,
+            ],
+        }
+    }
+
+    fn handle_msg(
+        &mut self,
+        state: &State,
+        msg: Msg,
+        out: &mut MidiWriter<'_>,
+    ) -> Result<(), jack::Error> {
+        self.set_template(0x08);
+        match msg {
+            Msg::filter_passthru_1(v) => {
+                if v {
+                    self.set_off_led();
+                } else {
+                    self.set_red_led();
+                };
+                self.write_strip(0x00, out)?;
+            }
+            Msg::filter_passthru_2(v) => {
+                if v {
+                    self.set_off_led();
+                } else {
+                    self.set_red_led();
+                };
+                self.write_strip(0x01, out)?;
+            }
+            Msg::filter_passthru_3(v) => {
+                if v {
+                    self.set_off_led();
+                } else {
+                    self.set_red_led();
+                };
+                self.write_strip(0x02, out)?;
+            }
+            Msg::filter_passthru_4(v) => {
+                if v {
+                    self.set_off_led();
+                } else {
+                    self.set_red_led();
+                };
+                self.write_strip(0x03, out)?;
+            }
+            Msg::filter_passthru_5(v) => {
+                if v {
+                    self.set_off_led();
+                } else {
+                    self.set_red_led();
+                };
+                self.write_strip(0x04, out)?;
+            }
+            Msg::filter_passthru_6(v) => {
+                if v {
+                    self.set_off_led();
+                } else {
+                    self.set_red_led();
+                };
+                self.write_strip(0x05, out)?;
+            }
+            Msg::filter_passthru_7(v) => {
+                if v {
+                    self.set_off_led();
+                } else {
+                    self.set_red_led();
+                };
+                self.write_strip(0x06, out)?;
+            }
+            Msg::filter_passthru_8(v) => {
+                if v {
+                    self.set_off_led();
+                } else {
+                    self.set_red_led();
+                };
+                self.write_strip(0x07, out)?;
+            }
+            _ => (),
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn set_green_led(&mut self) {
+        self.buf[9] = 0b0011_1100
+    }
+
+    #[inline(always)]
+    fn set_red_led(&mut self) {
+        self.buf[9] = 0b0000_1111
+    }
+
+    #[inline(always)]
+    fn set_off_led(&mut self) {
+        self.buf[9] = 0b0000_1100
+    }
+
+    #[inline(always)]
+    fn set_template(&mut self, template: u8) {
+        self.buf[7] = template;
+    }
+
+    #[inline(always)]
+    fn set_index(&mut self, index: u8) {
+        self.buf[8] = index;
+    }
+
+    #[inline]
+    fn write_strip(&mut self, strip: u8, writer: &mut MidiWriter<'_>) -> Result<(), jack::Error> {
+        self.set_index(strip);
+        self.write_current(writer)?;
+        self.set_index(strip + 0x8);
+        self.write_current(writer)?;
+        self.set_index(strip + 0x10);
+        self.write_current(writer)?;
+        self.set_index(strip + 0x18);
+        self.write_current(writer)?;
+        Ok(())
+    }
+
+    fn reset(&mut self, writer: &mut MidiWriter<'_>) -> Result<(), jack::Error> {
+        writer.write(&jack::RawMidi {
+            time: 0,
+            bytes: &[0xb8, 0x00, 0x00],
+        })
+    }
+
+    #[inline(always)]
+    fn write_current(&self, writer: &mut MidiWriter<'_>) -> Result<(), jack::Error> {
+        writer.write(&jack::RawMidi {
+            time: 0,
+            bytes: &self.buf,
+        })
+    }
 }

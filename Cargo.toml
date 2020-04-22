@@ -1,6 +1,6 @@
 [package]
 name = "jack-mixer"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Richard Dodd <richard.o.dodd@gmail.com>"]
 edition = "2018"
 description = """
@@ -19,11 +19,12 @@ structopt = "0.2.18"
 crossbeam-channel = "0.3.8"
 jack = "0.6.2"
 druid = "0.5"
-novation_launch_control = { version = "0.1", path = "./novation_launch_control" }
 anyhow = "1.0.28"
+midi-event = "0.2.0"
 
 [workspace]
 members = [
     ".",
     "novation_launch_control"
     ]
+
