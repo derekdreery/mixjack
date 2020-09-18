@@ -1,22 +1,38 @@
 use crate::{
-    gui::widgets::{App, Fader, Knob},
-    Msg, Result, State,
+    data::{ChanInfo, Msg, PcmInfo, State, StateChange},
+    gui::widgets::{App, Fader, FaderData, Knob},
+    Result,
 };
 use crossbeam_channel as channel;
 use druid::{
+    lens::Map as LensMap,
     widget::{prelude::*, Flex, Label, MainAxisAlignment, Switch},
     AppDelegate, AppLauncher, Color, Command, Data, DelegateCtx, ExtEventSink, Lens, LensExt,
     LocalizedString, Selector, Target, Widget, WidgetExt, WindowDesc,
 };
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
-pub const UPDATE: Selector = Selector::new("update");
-const APP_TITLE: LocalizedString<State> = LocalizedString::new("app-title");
+pub const UPDATE: Selector<Msg> = Selector::new("update");
+const APP_TITLE: LocalizedString<GuiState> = LocalizedString::new("app-title");
 const PADDING: f64 = 20.0;
 
 mod widgets;
 
-fn build_ui(tx: channel::Sender<Msg>) -> impl Widget<State> {
+#[derive(Debug, Data, Clone, Lens, Default, PartialEq)]
+pub struct GuiState {
+    shared: State,
+    info: PcmInfo,
+    show_levels: [bool; 8],
+}
+
+impl GuiState {
+    fn process_info(&mut self, info: PcmInfo) {
+        self.info = info;
+    }
+}
+
+fn build_ui(tx: channel::Sender<StateChange>) -> impl Widget<GuiState> {
     let red_hue = 10.0;
     let yellow_hue = 90.0;
     let green_hue = 120.0;
@@ -61,85 +77,283 @@ fn build_ui(tx: channel::Sender<Msg>) -> impl Widget<State> {
                 Flex::row()
                     .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
                     .must_fill_main_axis(true)
-                    .with_child(red_fader.clone().lens(State::fader_1_1))
-                    .with_child(red_fader.clone().lens(State::fader_1_2))
-                    .with_child(yellow_fader.clone().lens(State::fader_1_3))
-                    .with_child(yellow_fader.clone().lens(State::fader_1_4))
-                    .with_child(green_fader.clone().lens(State::fader_1_5))
-                    .with_child(green_fader.clone().lens(State::fader_1_6))
-                    .with_child(orange_fader.clone().lens(State::fader_1_7))
-                    .with_child(orange_fader.clone().lens(State::fader_1_8)),
+                    .with_child(
+                        red_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_1_1)),
+                    )
+                    .with_child(
+                        red_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_1_2)),
+                    )
+                    .with_child(
+                        yellow_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_1_3)),
+                    )
+                    .with_child(
+                        yellow_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_1_4)),
+                    )
+                    .with_child(
+                        green_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_1_5)),
+                    )
+                    .with_child(
+                        green_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_1_6)),
+                    )
+                    .with_child(
+                        orange_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_1_7)),
+                    )
+                    .with_child(
+                        orange_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_1_8)),
+                    ),
             )
             .with_child(
                 Flex::row()
                     .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
                     .must_fill_main_axis(true)
-                    .with_child(red_fader.clone().lens(State::fader_2_1))
-                    .with_child(red_fader.clone().lens(State::fader_2_2))
-                    .with_child(yellow_fader.clone().lens(State::fader_2_3))
-                    .with_child(yellow_fader.clone().lens(State::fader_2_4))
-                    .with_child(green_fader.clone().lens(State::fader_2_5))
-                    .with_child(green_fader.clone().lens(State::fader_2_6))
-                    .with_child(orange_fader.clone().lens(State::fader_2_7))
-                    .with_child(orange_fader.clone().lens(State::fader_2_8)),
+                    .with_child(
+                        red_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_2_1)),
+                    )
+                    .with_child(
+                        red_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_2_2)),
+                    )
+                    .with_child(
+                        yellow_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_2_3)),
+                    )
+                    .with_child(
+                        yellow_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_2_4)),
+                    )
+                    .with_child(
+                        green_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_2_5)),
+                    )
+                    .with_child(
+                        green_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_2_6)),
+                    )
+                    .with_child(
+                        orange_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_2_7)),
+                    )
+                    .with_child(
+                        orange_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_2_8)),
+                    ),
             )
             .with_child(
                 Flex::row()
                     .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
                     .must_fill_main_axis(true)
-                    .with_child(red_fader.clone().lens(State::fader_3_1))
-                    .with_child(red_fader.clone().lens(State::fader_3_2))
-                    .with_child(yellow_fader.clone().lens(State::fader_3_3))
-                    .with_child(yellow_fader.clone().lens(State::fader_3_4))
-                    .with_child(green_fader.clone().lens(State::fader_3_5))
-                    .with_child(green_fader.clone().lens(State::fader_3_6))
-                    .with_child(orange_fader.clone().lens(State::fader_3_7))
-                    .with_child(orange_fader.clone().lens(State::fader_3_8)),
+                    .with_child(
+                        red_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_3_1)),
+                    )
+                    .with_child(
+                        red_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_3_2)),
+                    )
+                    .with_child(
+                        yellow_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_3_3)),
+                    )
+                    .with_child(
+                        yellow_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_3_4)),
+                    )
+                    .with_child(
+                        green_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_3_5)),
+                    )
+                    .with_child(
+                        green_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_3_6)),
+                    )
+                    .with_child(
+                        orange_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_3_7)),
+                    )
+                    .with_child(
+                        orange_fader
+                            .clone()
+                            .lens(GuiState::shared.then(State::fader_3_8)),
+                    ),
             )
             .with_child(
                 Flex::row()
                     .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
                     .must_fill_main_axis(true)
-                    .with_child(switch().lens(lens_not(State::filter_passthru_1)))
-                    .with_child(switch().lens(lens_not(State::filter_passthru_2)))
-                    .with_child(switch().lens(lens_not(State::filter_passthru_3)))
-                    .with_child(switch().lens(lens_not(State::filter_passthru_4)))
-                    .with_child(switch().lens(lens_not(State::filter_passthru_5)))
-                    .with_child(switch().lens(lens_not(State::filter_passthru_6)))
-                    .with_child(switch().lens(lens_not(State::filter_passthru_7)))
-                    .with_child(switch().lens(lens_not(State::filter_passthru_8))),
+                    .with_child(
+                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_1))),
+                    )
+                    .with_child(
+                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_2))),
+                    )
+                    .with_child(
+                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_3))),
+                    )
+                    .with_child(
+                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_4))),
+                    )
+                    .with_child(
+                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_5))),
+                    )
+                    .with_child(
+                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_6))),
+                    )
+                    .with_child(
+                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_7))),
+                    )
+                    .with_child(
+                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_8))),
+                    ),
             )
             .with_child(
                 Flex::row()
                     .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
                     .must_fill_main_axis(true)
-                    .with_child(Fader::new().lens(State::fader_4_1))
-                    .with_child(Fader::new().lens(State::fader_4_2))
-                    .with_child(Fader::new().lens(State::fader_4_3))
-                    .with_child(Fader::new().lens(State::fader_4_4))
-                    .with_child(Fader::new().lens(State::fader_4_5))
-                    .with_child(Fader::new().lens(State::fader_4_6))
-                    .with_child(Fader::new().lens(State::fader_4_7))
-                    .with_child(Fader::new().lens(State::fader_4_8)),
+                    .with_child(Fader::new().lens(LensMap::new(
+                        |gui_state: &GuiState| FaderData {
+                            position: gui_state.shared.fader_4_1,
+                            info: gui_state.info.in1,
+                            show_levels: gui_state.show_levels[0],
+                        },
+                        // Ignore fader change
+                        |mut gui_state, data| gui_state.shared.fader_4_1 = data.position,
+                    )))
+                    .with_child(Fader::new().lens(LensMap::new(
+                        |gui_state: &GuiState| FaderData {
+                            position: gui_state.shared.fader_4_2,
+                            info: gui_state.info.in2,
+                            show_levels: gui_state.show_levels[1],
+                        },
+                        |mut gui_state, data| gui_state.shared.fader_4_2 = data.position,
+                    )))
+                    .with_child(Fader::new().lens(LensMap::new(
+                        |gui_state: &GuiState| FaderData {
+                            position: gui_state.shared.fader_4_3,
+                            info: gui_state.info.in3,
+                            show_levels: gui_state.show_levels[2],
+                        },
+                        |mut gui_state, data| gui_state.shared.fader_4_3 = data.position,
+                    )))
+                    .with_child(Fader::new().lens(LensMap::new(
+                        |gui_state: &GuiState| FaderData {
+                            position: gui_state.shared.fader_4_4,
+                            info: gui_state.info.in4,
+                            show_levels: gui_state.show_levels[3],
+                        },
+                        |mut gui_state, data| gui_state.shared.fader_4_4 = data.position,
+                    )))
+                    .with_child(Fader::new().lens(LensMap::new(
+                        |gui_state: &GuiState| FaderData {
+                            position: gui_state.shared.fader_4_5,
+                            info: gui_state.info.in5,
+                            show_levels: gui_state.show_levels[4],
+                        },
+                        |mut gui_state, data| gui_state.shared.fader_4_5 = data.position,
+                    )))
+                    .with_child(Fader::new().lens(LensMap::new(
+                        |gui_state: &GuiState| FaderData {
+                            position: gui_state.shared.fader_4_6,
+                            info: gui_state.info.in6,
+                            show_levels: gui_state.show_levels[5],
+                        },
+                        |mut gui_state, data| gui_state.shared.fader_4_6 = data.position,
+                    )))
+                    .with_child(Fader::new().lens(LensMap::new(
+                        |gui_state: &GuiState| FaderData {
+                            position: gui_state.shared.fader_4_7,
+                            info: gui_state.info.in7,
+                            show_levels: gui_state.show_levels[6],
+                        },
+                        |mut gui_state, data| gui_state.shared.fader_4_7 = data.position,
+                    )))
+                    .with_child(Fader::new().lens(LensMap::new(
+                        |gui_state: &GuiState| FaderData {
+                            position: gui_state.shared.fader_4_8,
+                            info: gui_state.info.in8,
+                            show_levels: gui_state.show_levels[7],
+                        },
+                        |mut gui_state, data| gui_state.shared.fader_4_8 = data.position,
+                    ))),
             ),
         tx,
     )
 }
 
-struct Delegate;
+struct Delegate {
+    // used to debounce feedback from the RT thread.
+    last_update: Instant,
+    info_acc: PcmInfo,
+}
 
-impl AppDelegate<State> for Delegate {
+impl Delegate {
+    fn new() -> Self {
+        Delegate {
+            last_update: Instant::now(),
+            info_acc: PcmInfo::default(),
+        }
+    }
+}
+
+const DURATION: Duration = Duration::from_millis(200);
+
+impl AppDelegate<GuiState> for Delegate {
     fn command(
         &mut self,
         _ctx: &mut DelegateCtx,
-        _target: &Target,
+        _target: Target,
         cmd: &Command,
-        data: &mut State,
+        data: &mut GuiState,
         _env: &Env,
     ) -> bool {
-        if cmd.selector == UPDATE {
-            let msg: &Msg = cmd.get_object().unwrap();
-            data.update(*msg);
+        if let Some(msg) = cmd.get(UPDATE) {
+            match msg {
+                Msg::StateChange(sc) => {
+                    data.shared.update(*sc);
+                }
+                Msg::PcmInfo(info) => {
+                    let now = Instant::now();
+                    self.info_acc.merge(info);
+                    if now - self.last_update > DURATION {
+                        // dispatch command
+                        data.process_info(self.info_acc);
+                        // reset
+                        self.last_update = now;
+                        self.info_acc.clear();
+                    }
+                }
+            };
             false
         } else {
             true
@@ -148,7 +362,7 @@ impl AppDelegate<State> for Delegate {
 }
 
 pub fn run(
-    tx: channel::Sender<Msg>,
+    tx: channel::Sender<StateChange>,
     shutdown_tx: channel::Sender<()>,
 ) -> Result<(ExtEventSink, JoinHandle<Result>)> {
     let (oneshot_tx, oneshot_rx) = channel::bounded(0);
@@ -160,11 +374,11 @@ pub fn run(
                 8.0 * widgets::WIDTH + 9.0 * PADDING,
                 3.0 * widgets::KNOB_HEIGHT + widgets::FADER_HEIGHT + 5.0 * PADDING,
             ));
-        let launcher = AppLauncher::with_window(window).delegate(Delegate);
+        let launcher = AppLauncher::with_window(window).delegate(Delegate::new());
         oneshot_tx.send(launcher.get_external_handle()).unwrap();
         drop(oneshot_tx);
 
-        launcher.launch(State::default())?;
+        launcher.launch(GuiState::default())?;
         shutdown_tx.send(())?;
         Ok(())
     });

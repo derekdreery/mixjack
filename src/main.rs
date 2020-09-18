@@ -5,12 +5,13 @@ mod gui;
 mod ports;
 
 use crossbeam_channel as channel;
+use druid::Target;
 use jack::Client;
 use structopt::StructOpt;
 
 use crate::{
     cli::Opt,
-    data::{Msg, State},
+    data::{ChanInfo, Msg, PcmInfo, State, StateChange},
     ports::Ports,
 };
 
@@ -48,12 +49,13 @@ fn run(opts: Opt) -> Result {
     let _async_client = client.activate_async((), ports)?;
 
     let (evt_sink, ui_handle) = gui::run(tx_ui, shutdown_tx)?;
+
     loop {
         channel::select! {
             recv(rx_ui) -> msg => {
                 // translate from non-blocking crossbeam::Channel to blocking to ExtEventSink
                 let msg = msg?; // There should never be an error here.
-                evt_sink.submit_command(gui::UPDATE, msg, None)?;
+                evt_sink.submit_command(gui::UPDATE, msg, Target::Global)?;
             }
             recv(shutdown_rx) -> res => {
                 // There should never be an error here.

@@ -18,9 +18,10 @@ pretty_env_logger = "0.3.0"
 structopt = "0.2.18"
 crossbeam-channel = "0.3.8"
 jack = "0.6.2"
-druid = "0.5"
+druid = "0.6"
 anyhow = "1.0.28"
 midi-event = "0.2.0"
+itertools = "0.9.0"
 
 [workspace]
 members = [
@@ -28,3 +29,7 @@ members = [
     "novation_launch_control"
     ]
 
+
+[patch.crates-io]
+#druid = { version = "0.6", path = "../../contrib/druid/druid" }
+#kurbo = { version = "0.5.11", path = "../../contrib/kurbo" }
