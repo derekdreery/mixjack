@@ -7,7 +7,8 @@ use jack::{
     AudioIn, AudioOut, Client, Control, MidiIn, MidiOut, MidiWriter, Port, ProcessHandler,
     ProcessScope,
 };
-use midi_event::{MidiEvent, Parse};
+use midi_event::{Event, MidiEvent, MidiEventType, Note, Parse};
+use serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
 
 macro_rules! handle_error {

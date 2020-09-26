@@ -2,11 +2,10 @@ use crate::{
     data::{ChanInfo, State, StateChange},
     gui::GuiState,
 };
-// todo bounded crossbeam channels are not completely lock-free - maybe there is a better choice.
 use crossbeam_channel as channel;
 use druid::{
     piet::{
-        kurbo::{Arc, BezPath, Line},
+        kurbo::{Arc, BezPath, Line, PathEl},
         Brush,
     },
     widget::prelude::*,
@@ -127,11 +126,7 @@ impl Widget<f64> for Knob {
                     widget_val: *data,
                 });
             }
-            Event::MouseMove(MouseEvent {
-                button: MouseButton::Left,
-                window_pos,
-                ..
-            }) => {
+            Event::MouseMove(MouseEvent { window_pos, .. }) => {
                 if let Some(drag_start) = self.drag_start {
                     *data = (drag_start.widget_val
                         + (drag_start.mouse_y - window_pos.y) * SCALE_FACTOR)
@@ -160,11 +155,12 @@ impl Widget<f64> for Knob {
 
     fn layout(
         &mut self,
-        _layout_ctx: &mut LayoutCtx,
+        ctx: &mut LayoutCtx,
         bc: &BoxConstraints,
         _data: &f64,
         _env: &Env,
     ) -> Size {
+        ctx.set_paint_insets(Insets::uniform(1.0));
         bc.constrain(Size::new(WIDTH, KNOB_HEIGHT))
     }
 
@@ -243,7 +239,6 @@ impl Widget<FaderData> for Fader {
                 window_pos,
                 ..
             }) => {
-                println!("MouseDown");
                 ctx.set_active(true);
                 self.drag_start = Some(DragStart {
                     mouse_y: window_pos.y,
@@ -255,7 +250,6 @@ impl Widget<FaderData> for Fader {
                 window_pos,
                 ..
             }) => {
-                println!("MouseMove");
                 if buttons.contains(MouseButton::Left) {
                     if let Some(drag_start) = self.drag_start {
                         data.position = (drag_start.widget_val
@@ -270,7 +264,6 @@ impl Widget<FaderData> for Fader {
                 button: MouseButton::Left,
                 ..
             }) => {
-                println!("MouseUp");
                 self.drag_start = None;
                 ctx.set_active(false);
             }
@@ -372,8 +365,24 @@ fn fader(bounds: Rect, fg_brush: &Brush, bg_brush: &Brush, ctx: &mut PaintCtx) {
         (bounds.x1 - MIDDLE_LINE_BORDER, middle_y),
     );
 
-    ctx.fill(bounds, bg_brush);
-    ctx.stroke(bounds, fg_brush, 1.0);
+    // TODO make this function independent of position (so that the path can be cached)
+    const CURVE_FACTOR: f64 = 0.15;
+    let shape = vec![
+        PathEl::MoveTo(Point::new(bounds.x0, bounds.y0)),
+        PathEl::QuadTo(
+            bounds.center() - Vec2::new(0.0, bounds.height() * (0.5 - CURVE_FACTOR)),
+            Point::new(bounds.x1, bounds.y0),
+        ),
+        PathEl::LineTo(Point::new(bounds.x1, bounds.y1)),
+        PathEl::QuadTo(
+            bounds.center() + Vec2::new(0.0, bounds.height() * (0.5 - CURVE_FACTOR)),
+            Point::new(bounds.x0, bounds.y1),
+        ),
+        PathEl::ClosePath,
+    ];
+
+    ctx.fill(&*shape, bg_brush);
+    ctx.stroke(&*shape, fg_brush, 1.5);
     ctx.stroke(center_line, fg_brush, 2.0);
 }
 
