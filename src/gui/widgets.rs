@@ -1,7 +1,4 @@
-use crate::{
-    data::{ChanInfo, State, StateChange},
-    gui::GuiState,
-};
+use crate::{audio::AudioMsg, data::Metering, gui::State};
 use crossbeam_channel as channel;
 use druid::{
     piet::{
@@ -20,15 +17,12 @@ pub const FADER_HEIGHT: f64 = 200.0;
 const SLIDER_HEIGHT: f64 = 20.0;
 
 pub struct App {
-    inner: WidgetPod<GuiState, Box<dyn Widget<GuiState>>>,
-    tx: channel::Sender<StateChange>,
+    inner: WidgetPod<State, Box<dyn Widget<State>>>,
+    tx: channel::Sender<AudioMsg>,
 }
 
 impl App {
-    pub fn from_parts(
-        inner: impl Widget<GuiState> + 'static,
-        tx: channel::Sender<StateChange>,
-    ) -> Self {
+    pub fn from_parts(inner: impl Widget<State> + 'static, tx: channel::Sender<AudioMsg>) -> Self {
         App {
             inner: WidgetPod::new(inner).boxed(),
             tx,
@@ -36,28 +30,20 @@ impl App {
     }
 }
 
-impl Widget<GuiState> for App {
-    fn event(&mut self, ctx: &mut EventCtx, event: &Event, data: &mut GuiState, env: &Env) {
+impl Widget<State> for App {
+    fn event(&mut self, ctx: &mut EventCtx, event: &Event, data: &mut State, env: &Env) {
         let old_data = data.clone();
         self.inner.event(ctx, event, data, env);
         if *data != old_data {
-            data.shared
-                .compute_changes(&old_data.shared, &self.tx)
-                .unwrap();
+            data.sync_audio(&old_data, &self.tx).unwrap();
         }
     }
 
-    fn lifecycle(&mut self, ctx: &mut LifeCycleCtx, event: &LifeCycle, data: &GuiState, env: &Env) {
+    fn lifecycle(&mut self, ctx: &mut LifeCycleCtx, event: &LifeCycle, data: &State, env: &Env) {
         self.inner.lifecycle(ctx, event, data, env)
     }
 
-    fn update(
-        &mut self,
-        ctx: &mut UpdateCtx,
-        _old_data: &GuiState,
-        new_data: &GuiState,
-        env: &Env,
-    ) {
+    fn update(&mut self, ctx: &mut UpdateCtx, _old_data: &State, new_data: &State, env: &Env) {
         self.inner.update(ctx, new_data, env)
     }
 
@@ -65,7 +51,7 @@ impl Widget<GuiState> for App {
         &mut self,
         ctx: &mut LayoutCtx,
         bc: &BoxConstraints,
-        new_data: &GuiState,
+        new_data: &State,
         env: &Env,
     ) -> Size {
         self.inner
@@ -73,7 +59,7 @@ impl Widget<GuiState> for App {
         self.inner.layout(ctx, bc, new_data, env)
     }
 
-    fn paint(&mut self, ctx: &mut PaintCtx, data: &GuiState, env: &Env) {
+    fn paint(&mut self, ctx: &mut PaintCtx, data: &State, env: &Env) {
         self.inner.paint(ctx, data, env)
     }
 }
@@ -211,7 +197,7 @@ pub struct FaderData {
     /// position of the fader, between 0 and 1.
     pub position: f64,
     /// Feedback from the mixer.
-    pub info: ChanInfo,
+    pub metering: Metering,
     /// Show the feedback from the mixer
     pub show_levels: bool,
 }
@@ -273,7 +259,7 @@ impl Widget<FaderData> for Fader {
 
     fn update(&mut self, ctx: &mut UpdateCtx, old: &FaderData, new: &FaderData, _env: &Env) {
         if old != new {
-            self.all_time_max = self.all_time_max.max(new.info.max);
+            self.all_time_max = new.metering.max;
             ctx.request_paint();
         }
     }
@@ -301,14 +287,14 @@ impl Widget<FaderData> for Fader {
     fn paint(&mut self, ctx: &mut PaintCtx, data: &FaderData, _env: &Env) {
         // Clamp the relative position.
         let position = data.position.min(1.0).max(0.0);
-        let rms = data.info.rms().min(1.0).max(0.0);
-        let max = self.all_time_max.min(1.0).max(0.0);
+        let rms = data.metering.rms.min(1.0).max(0.0);
+        let max = data.metering.max.min(1.0).max(0.0);
 
         let light_brush = ctx.solid_brush(Color::WHITE);
         let dark_brush = ctx.solid_brush(Color::grey(0.5));
         let black_brush = ctx.solid_brush(Color::BLACK);
-        let max_brush = ctx.solid_brush(Color::rgb(0.0, 0.3, 0.0));
-        let rms_brush = ctx.solid_brush(Color::rgb(0.0, 0.5, 0.0));
+        let max_brush = ctx.solid_brush(Color::rgba(0.0, 1.0, 0.0, 0.2));
+        let rms_brush = ctx.solid_brush(Color::rgb(0.0, 0.6, 0.0));
 
         let bounds = ctx
             .size()
@@ -322,25 +308,19 @@ impl Widget<FaderData> for Fader {
         let bottom = Point::new(center.x, bounds.max_y());
         let fader_center = bottom.lerp(top, position);
 
-        let rms_top = bottom.lerp(top, rms).y;
         let max_top = bottom.lerp(top, max).y;
+        let rms_top = bottom.lerp(top, rms).y;
 
-        // draw sound level
+        let level_start_x = lerp(bounds.x0, bounds.x1, 0.2);
+        let level_end_x = lerp(bounds.x0, bounds.x1, 0.8);
         if data.show_levels {
-            let level_start_x = lerp(bounds.x0, bounds.x1, 0.2);
-            let level_end_x = lerp(bounds.x0, bounds.x1, 0.8);
-            ctx.stroke(
-                Line::new((level_start_x, max_top), (level_end_x, max_top)),
-                &max_brush,
-                2.0,
-            );
             ctx.fill(
                 Rect::from_points((level_start_x, rms_top), (level_end_x, bounds.y1)),
                 &rms_brush,
             );
         }
 
-        // draw fiader
+        // draw fader
         ctx.stroke(Line::new(top, bottom), &dark_brush, 2.0);
         ctx.stroke(Line::new(fader_center, bottom), &light_brush, 2.0);
         fader(
@@ -352,7 +332,15 @@ impl Widget<FaderData> for Fader {
             },
             &black_brush,
             ctx,
-        )
+        );
+
+        // draw sound level
+        if data.show_levels {
+            ctx.fill(
+                Rect::new(level_start_x, max_top, level_end_x, bounds.y1),
+                &max_brush,
+            );
+        }
     }
 }
 

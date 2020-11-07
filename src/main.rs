@@ -1,18 +1,18 @@
+mod audio;
 mod cli;
 mod data;
 mod effects;
 mod gui;
-mod ports;
 
 use crossbeam_channel as channel;
 use druid::Target;
 use jack::Client;
+use std::sync::Arc;
 use structopt::StructOpt;
 
 use crate::{
-    cli::Opt,
-    data::{ChanInfo, Msg, PcmInfo, State, StateChange},
-    ports::Ports,
+    audio::Audio,
+    cli::{Config, Opt},
 };
 
 type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
@@ -23,6 +23,8 @@ const FILTER_LENGTH: usize = 21;
 
 /// Main programm runner.
 fn run(opts: Opt) -> Result {
+    let config = Arc::new(Config::load(opts.config_file)?);
+
     let (client, status) = Client::new(&opts.jack_name, jack::ClientOptions::NO_START_SERVER)?;
     log::info!("client status: {:?}", status);
     log::info!("sample rate: {}", client.sample_rate());
@@ -37,7 +39,8 @@ fn run(opts: Opt) -> Result {
     // a channel for finding out when the ui has shut down.
     let (shutdown_tx, shutdown_rx) = channel::bounded(0);
 
-    let ports = Ports::setup(
+    let audio = Audio::setup(
+        &*config,
         &client,
         tx_rt,
         rx_rt,
@@ -46,9 +49,9 @@ fn run(opts: Opt) -> Result {
         FILTER_LENGTH,
     )?;
     // todo look at shutting down gracefully, whether that is necessary
-    let _async_client = client.activate_async((), ports)?;
+    let _async_client = client.activate_async((), audio)?;
 
-    let (evt_sink, ui_handle) = gui::run(tx_ui, shutdown_tx)?;
+    let (evt_sink, ui_handle) = gui::run(tx_ui, shutdown_tx, config)?;
 
     loop {
         channel::select! {
@@ -76,7 +79,7 @@ fn main() {
     let opts = Opt::from_args();
     setup_logger(opts.verbosity);
     if let Err(err) = run(opts) {
-        log::error!("{}", err);
+        log::error!("{:?}", err);
         for e in err.chain().skip(1) {
             log::error!("caused by {}", e);
         }
@@ -94,6 +97,6 @@ fn setup_logger(verbosity: u32) {
     };
     pretty_env_logger::formatted_timed_builder()
         .filter(None, LevelFilter::Warn)
-        .filter(Some("jack_volume"), level)
+        .filter(Some("jack_mixer"), level)
         .init()
 }

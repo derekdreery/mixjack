@@ -18,20 +18,24 @@ pretty_env_logger = "0.3.0"
 structopt = "0.2.18"
 crossbeam-channel = "0.3.8"
 jack = "0.6.2"
-druid = "0.6"
+druid = { version = "0.6", features = ["im"] }
 anyhow = "1.0.28"
 midi-event = { version = "0.2.1", features = ["serde"] }
 itertools = "0.9.0"
 serde = { version = "1.0.116", features = ["derive"] }
 ron = "0.6.2"
+im = { version = "15.0.0", features = ["serde"] }
+toml = "0.5.7"
+directories = "3.0.1"
+fnv = "1.0.7"
 
 [workspace]
 members = [
     ".",
     "novation_launch_control"
-    ]
+]
 
 
 [patch.crates-io]
-#druid = { version = "0.6", path = "../../contrib/druid/druid" }
+druid = { version = "0.6", path = "../../contrib/druid/druid" }
 #kurbo = { version = "0.5.11", path = "../../contrib/kurbo" }

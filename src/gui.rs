@@ -1,38 +1,112 @@
 use crate::{
-    data::{ChanInfo, Msg, PcmInfo, State, StateChange},
+    audio::AudioMsg,
+    cli::Config,
+    data::Metering,
     gui::widgets::{App, Fader, FaderData, Knob},
     Result,
 };
 use crossbeam_channel as channel;
 use druid::{
     lens::Map as LensMap,
-    widget::{prelude::*, Flex, Label, MainAxisAlignment, Switch},
-    AppDelegate, AppLauncher, Color, Command, Data, DelegateCtx, ExtEventSink, Lens, LensExt,
-    LocalizedString, Selector, Target, Widget, WidgetExt, WindowDesc,
+    widget::{prelude::*, Flex, Label, List, ListSpacing, MainAxisAlignment, Scroll, Switch},
+    AppDelegate, AppLauncher, Color, Command, Data, DelegateCtx, ExtEventSink, Handled, Lens,
+    LensExt, LocalizedString, Selector, Target, Widget, WidgetExt, WindowDesc,
 };
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use im::Vector;
+use itertools::izip;
+use std::{
+    sync::Arc,
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
 
-pub const UPDATE: Selector<Msg> = Selector::new("update");
-const APP_TITLE: LocalizedString<GuiState> = LocalizedString::new("app-title");
+pub const UPDATE: Selector<UiMsg> = Selector::new("mixjack.update");
+const APP_TITLE: LocalizedString<State> = LocalizedString::new("app-title");
 const PADDING: f64 = 20.0;
 
 mod widgets;
 
-#[derive(Debug, Data, Clone, Lens, Default, PartialEq)]
-pub struct GuiState {
-    shared: State,
-    info: PcmInfo,
-    show_levels: [bool; 8],
+#[derive(Debug, Data, Clone, Lens, PartialEq)]
+pub struct State {
+    channels: Vector<ChannelState>,
 }
 
-impl GuiState {
-    fn process_info(&mut self, info: PcmInfo) {
-        self.info = info;
+impl State {
+    pub fn new(config: &Config) -> Self {
+        let mut channels = Vector::new();
+        for (name, channel) in config.channels.iter() {
+            channels.push_back(ChannelState {
+                name: Arc::new(name.to_owned()),
+                gain: 0.0,
+                metering_on: false,
+                metering: Metering::default(),
+            });
+        }
+        State { channels }
+    }
+
+    fn update(&mut self, msg: &UiMsg) {
+        match msg {
+            UiMsg::Metering { channel, metering } => {
+                self.channels[*channel].metering = *metering;
+            }
+            UiMsg::Levels {
+                channel,
+                level: Level::Gain(gain),
+            } => {
+                self.channels[*channel].gain = *gain;
+            }
+            UiMsg::ToggleMetering { channel } => {
+                let mut metering_on = &mut self.channels[*channel].metering_on;
+                *metering_on = !*metering_on;
+            }
+        }
+    }
+
+    /// Send the required messages to audio to sync its parameters with the ui.
+    fn sync_audio(&self, prev: &Self, tx: &channel::Sender<AudioMsg>) -> Result<()> {
+        for (idx, (next, prev)) in izip!(self.channels.iter(), prev.channels.iter()).enumerate() {
+            if next.gain != prev.gain {
+                tx.send(AudioMsg {
+                    channel: idx,
+                    gain: next.gain,
+                })?;
+            }
+        }
+        Ok(())
     }
 }
 
-fn build_ui(tx: channel::Sender<StateChange>) -> impl Widget<GuiState> {
+#[derive(Debug, Clone, PartialEq, Lens)]
+pub struct ChannelState {
+    name: Arc<String>,
+    gain: f64,
+    metering_on: bool,
+    metering: Metering,
+}
+
+impl Data for ChannelState {
+    fn same(&self, other: &Self) -> bool {
+        Data::same(&self.name, &other.name)
+            && Data::same(&self.gain, &other.gain)
+            && Data::same(&self.metering_on, &other.metering_on)
+            && (Data::same(&self.metering, &other.metering) || !self.metering_on)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum UiMsg {
+    Levels { channel: usize, level: Level },
+    Metering { channel: usize, metering: Metering },
+    ToggleMetering { channel: usize },
+}
+
+#[derive(Debug, Clone)]
+pub enum Level {
+    Gain(f64),
+}
+
+fn build_ui(tx: channel::Sender<AudioMsg>) -> impl Widget<State> {
     let red_hue = 10.0;
     let yellow_hue = 90.0;
     let green_hue = 120.0;
@@ -57,256 +131,31 @@ fn build_ui(tx: channel::Sender<StateChange>) -> impl Widget<GuiState> {
         .with_fg(fg_color(orange_hue))
         .with_bg(bg_color(orange_hue));
 
+    let channels = List::horizontal(|| {
+        Flex::column()
+            .with_spacer(10.)
+            .with_child(Label::raw().lens(ChannelState::name))
+            .with_spacer(10.)
+            .with_child(Fader::new().lens(LensMap::new(
+                |state: &ChannelState| FaderData {
+                    position: state.gain,
+                    metering: state.metering,
+                    show_levels: state.metering_on,
+                },
+                |mut state, data| {
+                    state.gain = data.position;
+                },
+            )))
+            .with_spacer(10.)
+            .with_child(Switch::new().lens(ChannelState::metering_on))
+            .with_spacer(10.)
+    })
+    .with_spacing(ListSpacing::fixed(10.));
+
     App::from_parts(
         Flex::column()
             .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
-            .with_child(
-                Flex::row()
-                    .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
-                    .must_fill_main_axis(true)
-                    .with_child(label_fixed_width("in_1l"))
-                    .with_child(label_fixed_width("in_1r"))
-                    .with_child(label_fixed_width("in_2l"))
-                    .with_child(label_fixed_width("in_2r"))
-                    .with_child(label_fixed_width("in_3l"))
-                    .with_child(label_fixed_width("in_3r"))
-                    .with_child(label_fixed_width("in_4l"))
-                    .with_child(label_fixed_width("in_4r")),
-            )
-            .with_child(
-                Flex::row()
-                    .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
-                    .must_fill_main_axis(true)
-                    .with_child(
-                        red_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_1_1)),
-                    )
-                    .with_child(
-                        red_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_1_2)),
-                    )
-                    .with_child(
-                        yellow_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_1_3)),
-                    )
-                    .with_child(
-                        yellow_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_1_4)),
-                    )
-                    .with_child(
-                        green_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_1_5)),
-                    )
-                    .with_child(
-                        green_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_1_6)),
-                    )
-                    .with_child(
-                        orange_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_1_7)),
-                    )
-                    .with_child(
-                        orange_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_1_8)),
-                    ),
-            )
-            .with_child(
-                Flex::row()
-                    .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
-                    .must_fill_main_axis(true)
-                    .with_child(
-                        red_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_2_1)),
-                    )
-                    .with_child(
-                        red_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_2_2)),
-                    )
-                    .with_child(
-                        yellow_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_2_3)),
-                    )
-                    .with_child(
-                        yellow_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_2_4)),
-                    )
-                    .with_child(
-                        green_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_2_5)),
-                    )
-                    .with_child(
-                        green_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_2_6)),
-                    )
-                    .with_child(
-                        orange_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_2_7)),
-                    )
-                    .with_child(
-                        orange_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_2_8)),
-                    ),
-            )
-            .with_child(
-                Flex::row()
-                    .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
-                    .must_fill_main_axis(true)
-                    .with_child(
-                        red_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_3_1)),
-                    )
-                    .with_child(
-                        red_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_3_2)),
-                    )
-                    .with_child(
-                        yellow_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_3_3)),
-                    )
-                    .with_child(
-                        yellow_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_3_4)),
-                    )
-                    .with_child(
-                        green_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_3_5)),
-                    )
-                    .with_child(
-                        green_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_3_6)),
-                    )
-                    .with_child(
-                        orange_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_3_7)),
-                    )
-                    .with_child(
-                        orange_fader
-                            .clone()
-                            .lens(GuiState::shared.then(State::fader_3_8)),
-                    ),
-            )
-            .with_child(
-                Flex::row()
-                    .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
-                    .must_fill_main_axis(true)
-                    .with_child(
-                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_1))),
-                    )
-                    .with_child(
-                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_2))),
-                    )
-                    .with_child(
-                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_3))),
-                    )
-                    .with_child(
-                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_4))),
-                    )
-                    .with_child(
-                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_5))),
-                    )
-                    .with_child(
-                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_6))),
-                    )
-                    .with_child(
-                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_7))),
-                    )
-                    .with_child(
-                        switch().lens(lens_not(GuiState::shared.then(State::filter_passthru_8))),
-                    ),
-            )
-            .with_child(
-                Flex::row()
-                    .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
-                    .must_fill_main_axis(true)
-                    .with_child(Fader::new().lens(LensMap::new(
-                        |gui_state: &GuiState| FaderData {
-                            position: gui_state.shared.fader_4_1,
-                            info: gui_state.info.in1,
-                            show_levels: gui_state.show_levels[0],
-                        },
-                        // Ignore fader change
-                        |mut gui_state, data| gui_state.shared.fader_4_1 = data.position,
-                    )))
-                    .with_child(Fader::new().lens(LensMap::new(
-                        |gui_state: &GuiState| FaderData {
-                            position: gui_state.shared.fader_4_2,
-                            info: gui_state.info.in2,
-                            show_levels: gui_state.show_levels[1],
-                        },
-                        |mut gui_state, data| gui_state.shared.fader_4_2 = data.position,
-                    )))
-                    .with_child(Fader::new().lens(LensMap::new(
-                        |gui_state: &GuiState| FaderData {
-                            position: gui_state.shared.fader_4_3,
-                            info: gui_state.info.in3,
-                            show_levels: gui_state.show_levels[2],
-                        },
-                        |mut gui_state, data| gui_state.shared.fader_4_3 = data.position,
-                    )))
-                    .with_child(Fader::new().lens(LensMap::new(
-                        |gui_state: &GuiState| FaderData {
-                            position: gui_state.shared.fader_4_4,
-                            info: gui_state.info.in4,
-                            show_levels: gui_state.show_levels[3],
-                        },
-                        |mut gui_state, data| gui_state.shared.fader_4_4 = data.position,
-                    )))
-                    .with_child(Fader::new().lens(LensMap::new(
-                        |gui_state: &GuiState| FaderData {
-                            position: gui_state.shared.fader_4_5,
-                            info: gui_state.info.in5,
-                            show_levels: gui_state.show_levels[4],
-                        },
-                        |mut gui_state, data| gui_state.shared.fader_4_5 = data.position,
-                    )))
-                    .with_child(Fader::new().lens(LensMap::new(
-                        |gui_state: &GuiState| FaderData {
-                            position: gui_state.shared.fader_4_6,
-                            info: gui_state.info.in6,
-                            show_levels: gui_state.show_levels[5],
-                        },
-                        |mut gui_state, data| gui_state.shared.fader_4_6 = data.position,
-                    )))
-                    .with_child(Fader::new().lens(LensMap::new(
-                        |gui_state: &GuiState| FaderData {
-                            position: gui_state.shared.fader_4_7,
-                            info: gui_state.info.in7,
-                            show_levels: gui_state.show_levels[6],
-                        },
-                        |mut gui_state, data| gui_state.shared.fader_4_7 = data.position,
-                    )))
-                    .with_child(Fader::new().lens(LensMap::new(
-                        |gui_state: &GuiState| FaderData {
-                            position: gui_state.shared.fader_4_8,
-                            info: gui_state.info.in8,
-                            show_levels: gui_state.show_levels[7],
-                        },
-                        |mut gui_state, data| gui_state.shared.fader_4_8 = data.position,
-                    ))),
-            ),
+            .with_child(Scroll::new(channels.lens(State::channels)).horizontal()),
         tx,
     )
 }
@@ -314,71 +163,56 @@ fn build_ui(tx: channel::Sender<StateChange>) -> impl Widget<GuiState> {
 struct Delegate {
     // used to debounce feedback from the RT thread.
     last_update: Instant,
-    info_acc: PcmInfo,
+    //info_acc: PcmInfo,
 }
 
 impl Delegate {
     fn new() -> Self {
         Delegate {
             last_update: Instant::now(),
-            info_acc: PcmInfo::default(),
+            //info_acc: PcmInfo::default(),
         }
     }
 }
 
-const DURATION: Duration = Duration::from_millis(200);
-
-impl AppDelegate<GuiState> for Delegate {
+impl AppDelegate<State> for Delegate {
     fn command(
         &mut self,
         _ctx: &mut DelegateCtx,
         _target: Target,
         cmd: &Command,
-        data: &mut GuiState,
+        data: &mut State,
         _env: &Env,
-    ) -> bool {
+    ) -> Handled {
         if let Some(msg) = cmd.get(UPDATE) {
-            match msg {
-                Msg::StateChange(sc) => {
-                    data.shared.update(*sc);
-                }
-                Msg::PcmInfo(info) => {
-                    let now = Instant::now();
-                    self.info_acc.merge(info);
-                    if now - self.last_update > DURATION {
-                        // dispatch command
-                        data.process_info(self.info_acc);
-                        // reset
-                        self.last_update = now;
-                        self.info_acc.clear();
-                    }
-                }
-            };
-            false
+            data.update(msg);
+            Handled::Yes
         } else {
-            true
+            Handled::No
         }
     }
 }
 
 pub fn run(
-    tx: channel::Sender<StateChange>,
+    tx: channel::Sender<AudioMsg>,
     shutdown_tx: channel::Sender<()>,
+    config: Arc<Config>,
 ) -> Result<(ExtEventSink, JoinHandle<Result>)> {
     let (oneshot_tx, oneshot_rx) = channel::bounded(0);
     // todo check if the ui should be on the main thread?
+    let len_channels = config.channels.len() as f64;
     let ui_handle = thread::spawn(move || {
         let window = WindowDesc::new(move || build_ui(tx))
-            .title(APP_TITLE.clone().with_placeholder("jack-mixer"))
+            .title(APP_TITLE.clone().with_placeholder("mixjack"))
             .window_size((
-                8.0 * widgets::WIDTH + 9.0 * PADDING,
+                len_channels * widgets::WIDTH + (len_channels + 1.) * PADDING,
                 3.0 * widgets::KNOB_HEIGHT + widgets::FADER_HEIGHT + 5.0 * PADDING,
             ));
         let launcher = AppLauncher::with_window(window).delegate(Delegate::new());
         oneshot_tx.send(launcher.get_external_handle()).unwrap();
         drop(oneshot_tx);
 
-        launcher.launch(GuiState::default())?;
+        launcher.launch(State::new(&*config))?;
         shutdown_tx.send(())?;
         Ok(())
     });
