@@ -6,6 +6,8 @@ This app requires jack, but the midi support is optional.
 
 ![a screenshot](./screenshot.png)
 
+Disclaimer: I've removed the EQ for now so this isn't completely accurate.
+
 # TODO
 
  - UI improvements.
