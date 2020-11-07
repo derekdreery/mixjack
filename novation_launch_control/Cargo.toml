@@ -6,7 +6,7 @@ Completely unofficial and not affiliated in any way.
 version = "0.1.0"
 authors = ["Richard Dodd <richard.o.dodd@gmail.com>"]
 edition = "2018"
-repository = "https://github.com/derekdreery/jack-mixer"
+repository = "https://github.com/derekdreery/mixjack"
 license = "MIT OR Apache-2.0"
 keywords = ["novation", "launchcontrol", "midi"]
 categories = ["multimedia::audio"]

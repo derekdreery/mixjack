@@ -1,12 +1,12 @@
 [package]
-name = "jack-mixer"
+name = "mixjack"
 version = "0.1.1"
 authors = ["Richard Dodd <richard.o.dodd@gmail.com>"]
 edition = "2018"
 description = """
 A simple mixer for jack using druid ui library. Also supports midi from LaunchControlXL
 """
-repository = "https://github.com/derekdreery/jack-mixer"
+repository = "https://github.com/derekdreery/mixjack"
 license = "MIT OR Apache-2.0"
 keywords = ["jack", "mixer", "equalizer", "3-band"]
 categories = ["multimedia::audio"]
@@ -18,7 +18,6 @@ pretty_env_logger = "0.3.0"
 structopt = "0.2.18"
 crossbeam-channel = "0.3.8"
 jack = "0.6.2"
-druid = { version = "0.6", features = ["im"] }
 anyhow = "1.0.28"
 midi-event = { version = "0.2.1", features = ["serde"] }
 itertools = "0.9.0"
@@ -29,6 +28,12 @@ toml = "0.5.7"
 directories = "3.0.1"
 fnv = "1.0.7"
 
+[dependencies.druid]
+version = "0.6"
+features = ["im"]
+git = "https://github.com/derekdreery/druid"
+branch = "list_row_col"
+
 [workspace]
 members = [
     ".",
@@ -37,5 +42,5 @@ members = [
 
 
 [patch.crates-io]
-druid = { version = "0.6", path = "../../contrib/druid/druid" }
+#druid = { version = "0.6", path = "../../contrib/druid/druid" }
 #kurbo = { version = "0.5.11", path = "../../contrib/kurbo" }
