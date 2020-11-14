@@ -8,7 +8,7 @@ use crate::{
 use crossbeam_channel as channel;
 use druid::{
     lens::Map as LensMap,
-    widget::{prelude::*, Flex, Label, List, ListSpacing, MainAxisAlignment, Scroll, Switch},
+    widget::{prelude::*, Flex, Label, List, MainAxisAlignment, Scroll, Switch},
     AppDelegate, AppLauncher, Color, Command, Data, DelegateCtx, ExtEventSink, Handled, Lens,
     LensExt, LocalizedString, Selector, Target, Widget, WidgetExt, WindowDesc,
 };
@@ -131,7 +131,7 @@ fn build_ui(tx: channel::Sender<AudioMsg>) -> impl Widget<State> {
         .with_fg(fg_color(orange_hue))
         .with_bg(bg_color(orange_hue));
 
-    let channels = List::horizontal(|| {
+    let channels = List::new(|| {
         Flex::column()
             .with_spacer(10.)
             .with_child(Label::raw().lens(ChannelState::name))
@@ -150,7 +150,8 @@ fn build_ui(tx: channel::Sender<AudioMsg>) -> impl Widget<State> {
             .with_child(Switch::new().lens(ChannelState::metering_on))
             .with_spacer(10.)
     })
-    .with_spacing(ListSpacing::fixed(10.));
+    .horizontal()
+    .with_spacing(10.);
 
     App::from_parts(
         Flex::column()

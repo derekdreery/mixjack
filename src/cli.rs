@@ -16,7 +16,7 @@ use structopt::StructOpt;
 
 const CONFIG_FILE_NAME: &str = "config.toml";
 
-/// Provide a simple adapter to alter the volume of a jack stream.
+/// Configurable mixer for jack, with optional midi control.
 #[derive(StructOpt, Debug)]
 pub struct Opt {
     /// How verbose should we be (normal = info, 1 = debug, 2+ = trace).

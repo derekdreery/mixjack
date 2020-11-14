@@ -31,8 +31,7 @@ fnv = "1.0.7"
 [dependencies.druid]
 version = "0.6"
 features = ["im"]
-git = "https://github.com/derekdreery/druid"
-branch = "list_row_col"
+git = "https://github.com/linebender/druid"
 
 [workspace]
 members = [
