@@ -54,4 +54,4 @@ members = [
 #druid = { version = "0.6", features = ["im"], path = "../../contrib/druid/druid" }
 #kurbo = { version = "0.5.11", path = "../../contrib/kurbo" }
 dasp = { path = "../../contrib/dasp/dasp" }
-fftw = { path = "../..//contrib/fftw-rs/fftw" }
+fftw = { path = "../../contrib/fftw-rs/fftw" }
