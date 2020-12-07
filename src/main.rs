@@ -1,77 +1,49 @@
-mod audio;
-mod cli;
-mod data;
-mod effects;
-mod gui;
-
-use crossbeam_channel as channel;
-use druid::Target;
-use jack::Client;
+use mixjack::{
+    cli::{Config, Opt},
+    effects::FIRFilter,
+    run_mixer, Result,
+};
 use std::sync::Arc;
 use structopt::StructOpt;
 
-use crate::{
-    audio::Audio,
-    cli::{Config, Opt},
-};
-
-type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
-
-const LOW_CUTOFF: f32 = 200.0;
-const HIGH_CUTOFF: f32 = 2000.0;
-const FILTER_LENGTH: usize = 21;
-
-/// Main programm runner.
 fn run(opts: Opt) -> Result {
-    let config = Arc::new(Config::load(opts.config_file)?);
-
-    let (client, status) = Client::new(&opts.jack_name, jack::ClientOptions::NO_START_SERVER)?;
-    log::info!("client status: {:?}", status);
-    log::info!("sample rate: {}", client.sample_rate());
-    log::info!("cpu_load: {}", client.cpu_load());
-    log::info!("name: {}", client.name());
-    log::info!("buffer size: {}", client.buffer_size());
-
-    // a channel for sending updates to the RT thread.
-    let (tx_ui, rx_rt) = channel::bounded(1024);
-    // a channel for sending updates from the RT thread to the gui.
-    let (tx_rt, rx_ui) = channel::bounded(1024);
-    // a channel for finding out when the ui has shut down.
-    let (shutdown_tx, shutdown_rx) = channel::bounded(0);
-
-    let audio = Audio::setup(
-        &*config,
-        &client,
-        tx_rt,
-        rx_rt,
-        LOW_CUTOFF,
-        HIGH_CUTOFF,
-        FILTER_LENGTH,
-    )?;
-    // todo look at shutting down gracefully, whether that is necessary
-    let _async_client = client.activate_async((), audio)?;
-
-    let (evt_sink, ui_handle) = gui::run(tx_ui, shutdown_tx, config)?;
-
-    loop {
-        channel::select! {
-            recv(rx_ui) -> msg => {
-                // translate from non-blocking crossbeam::Channel to blocking to ExtEventSink
-                let msg = msg?; // There should never be an error here.
-                evt_sink.submit_command(gui::UPDATE, msg, Target::Global)?;
-            }
-            recv(shutdown_rx) -> res => {
-                // There should never be an error here.
-                let _ = res?;
-                break
-            }
-        }
+    let config = Arc::new(Config::load(opts.config_file.as_ref())?);
+    if opts.print_filters {
+        use fftw::{
+            array::AlignedVec,
+            plan::{R2RPlan, R2RPlan32},
+            types::{Flag, R2RKind},
+        };
+        let lpfweights = FIRFilter::low_pass(800., 44100., 200).debug_weights();
+        let n = lpfweights.len();
+        let mut a = AlignedVec::new(n);
+        let mut b = AlignedVec::new(n);
+        let mut plan: R2RPlan32 =
+            R2RPlan::new(&[n], &mut a, &mut b, R2RKind::FFTW_R2HC, Flag::ESTIMATE).unwrap();
+        a.as_slice_mut().copy_from_slice(&lpfweights);
+        plan.r2r(&mut a, &mut b).unwrap();
+        println!("{:?}", b.as_slice());
+        return Ok(());
     }
-    ui_handle.join().unwrap()?;
-    Ok(())
+    if opts.print_window {
+        use fftw::{
+            array::AlignedVec,
+            plan::{R2RPlan, R2RPlan32},
+            types::{Flag, R2RKind},
+        };
+        let lpfwin = FIRFilter::low_pass(800., 44100., 512).debug_window();
+        let n = lpfwin.len();
+        let mut a = AlignedVec::new(n);
+        let mut b = AlignedVec::new(n);
+        let mut plan: R2RPlan32 =
+            R2RPlan::new(&[n], &mut a, &mut b, R2RKind::FFTW_R2HC, Flag::ESTIMATE).unwrap();
+        a.as_slice_mut().copy_from_slice(&lpfwin);
+        plan.r2r(&mut a, &mut b).unwrap();
+        println!("{:?}", b.as_slice());
+        return Ok(());
+    }
+    run_mixer(config, opts)
 }
-
-// boilerplate
 
 /// Wrap the run method so we can pass it command line args, setup logging, and handle errors
 /// gracefully.
@@ -97,6 +69,6 @@ fn setup_logger(verbosity: u32) {
     };
     pretty_env_logger::formatted_timed_builder()
         .filter(None, LevelFilter::Warn)
-        .filter(Some("jack_mixer"), level)
+        .filter(Some("mixjack"), level)
         .init()
 }

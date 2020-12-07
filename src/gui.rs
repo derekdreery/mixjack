@@ -1,18 +1,20 @@
 use crate::{
-    audio::AudioMsg,
+    audio::{AudioMsg, AudioMsgKind},
     cli::Config,
-    data::Metering,
-    gui::widgets::{App, Fader, FaderData, Knob},
+    data::{ChannelMode, Metering},
+    gui::widgets::{Fader, FaderData, Knob, Syncer},
     Result,
 };
 use crossbeam_channel as channel;
 use druid::{
-    lens::Map as LensMap,
-    widget::{prelude::*, Flex, Label, List, MainAxisAlignment, Scroll, Switch},
-    AppDelegate, AppLauncher, Color, Command, Data, DelegateCtx, ExtEventSink, Handled, Lens,
-    LensExt, LocalizedString, Selector, Target, Widget, WidgetExt, WindowDesc,
+    lens::{Constant, Map as LensMap},
+    widget::{prelude::*, Flex, Label, List, MainAxisAlignment, RadioGroup, Scroll, Switch},
+    AppDelegate, AppLauncher, ArcStr, Color, Command, Data, DelegateCtx, ExtEventSink, Handled,
+    Lens, LensExt, LocalizedString, MenuDesc, MenuItem, Selector, Target, Widget, WidgetExt,
+    WindowDesc,
 };
-use im::Vector;
+use druid_graphs::{LineChart, LineChartData, LineChartDataLensBuilder, Range};
+use im::{vector, Vector};
 use itertools::izip;
 use std::{
     sync::Arc,
@@ -20,14 +22,31 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const UPDATE: Selector<UiMsg> = Selector::new("mixjack.update");
-const APP_TITLE: LocalizedString<State> = LocalizedString::new("app-title");
 const PADDING: f64 = 20.0;
+pub const UPDATE: Selector<UiMsg> = Selector::new("mixjack.update");
+const SHOW_LOW_PASS: Selector<()> = Selector::new("mixjack.show-low-pass");
+const SHOW_INPUT_SPECTRUM: Selector<()> = Selector::new("mixjack.show-input-spectrum");
+const SHOW_OUTPUT_SPECTRUM: Selector<()> = Selector::new("mixjack.show-output-spectrum");
+
+const APP_TITLE: LocalizedString<State> = LocalizedString::new("app-title");
+const SPECTRA_MENU: LocalizedString<State> = LocalizedString::new("mixjack.spectra-menu");
+const LOW_PASS_MENU_ITEM: LocalizedString<State> =
+    LocalizedString::new("mixjack.low-pass-menu-item");
+const INPUT_SPECTRUM_MENU_ITEM: LocalizedString<State> =
+    LocalizedString::new("mixjack.input-spectrum-menu-item");
+const OUTPUT_SPECTRUM_MENU_ITEM: LocalizedString<State> =
+    LocalizedString::new("mixjack.output-spectrum-menu-item");
 
 mod widgets;
 
 #[derive(Debug, Data, Clone, Lens, PartialEq)]
 pub struct State {
+    /// The spectrum of the low pass filter, in half-complex form
+    /// `(r0, r1, .. rn/2, i(n+1)/2-1 .., i1)`.
+    // TODO use Arc<Vec> because we don't do random changes.
+    low_pass_spectrum: Vector<f64>,
+    audio_in_spectrum: Vector<f64>,
+    audio_out_spectrum: Vector<f64>,
     channels: Vector<ChannelState>,
 }
 
@@ -40,9 +59,15 @@ impl State {
                 gain: 0.0,
                 metering_on: false,
                 metering: Metering::default(),
+                mode: ChannelMode::default(),
             });
         }
-        State { channels }
+        State {
+            low_pass_spectrum: vector![],
+            audio_in_spectrum: vector![],
+            audio_out_spectrum: vector![],
+            channels,
+        }
     }
 
     fn update(&mut self, msg: &UiMsg) {
@@ -60,6 +85,15 @@ impl State {
                 let mut metering_on = &mut self.channels[*channel].metering_on;
                 *metering_on = !*metering_on;
             }
+            UiMsg::LowPassSpectrum(mod_spectrum) => {
+                self.low_pass_spectrum = mod_spectrum.iter().map(|v| *v as f64).collect();
+            }
+            UiMsg::AudioInSpectrum(mod_spectrum) => {
+                self.audio_in_spectrum = mod_spectrum.iter().map(|v| *v as f64).collect();
+            }
+            UiMsg::AudioOutSpectrum(mod_spectrum) => {
+                self.audio_out_spectrum = mod_spectrum.iter().map(|v| *v as f64).collect();
+            }
         }
     }
 
@@ -69,7 +103,13 @@ impl State {
             if next.gain != prev.gain {
                 tx.send(AudioMsg {
                     channel: idx,
-                    gain: next.gain,
+                    kind: AudioMsgKind::Gain(next.gain),
+                })?;
+            }
+            if next.mode != prev.mode {
+                tx.send(AudioMsg {
+                    channel: idx,
+                    kind: AudioMsgKind::Mode(next.mode),
                 })?;
             }
         }
@@ -83,6 +123,7 @@ pub struct ChannelState {
     gain: f64,
     metering_on: bool,
     metering: Metering,
+    mode: ChannelMode,
 }
 
 impl Data for ChannelState {
@@ -99,6 +140,9 @@ pub enum UiMsg {
     Levels { channel: usize, level: Level },
     Metering { channel: usize, metering: Metering },
     ToggleMetering { channel: usize },
+    LowPassSpectrum(Vec<f32>),
+    AudioInSpectrum(Vec<f32>),
+    AudioOutSpectrum(Vec<f32>),
 }
 
 #[derive(Debug, Clone)]
@@ -133,7 +177,6 @@ fn build_ui(tx: channel::Sender<AudioMsg>) -> impl Widget<State> {
 
     let channels = List::new(|| {
         Flex::column()
-            .with_spacer(10.)
             .with_child(Label::raw().lens(ChannelState::name))
             .with_spacer(10.)
             .with_child(Fader::new().lens(LensMap::new(
@@ -149,16 +192,28 @@ fn build_ui(tx: channel::Sender<AudioMsg>) -> impl Widget<State> {
             .with_spacer(10.)
             .with_child(Switch::new().lens(ChannelState::metering_on))
             .with_spacer(10.)
+            .with_child(
+                RadioGroup::new(
+                    [
+                        ("normal", ChannelMode::Normal),
+                        ("bypass", ChannelMode::Bypass),
+                        ("mute", ChannelMode::Mute),
+                    ]
+                    .iter()
+                    .copied(),
+                )
+                .lens(ChannelState::mode),
+            )
+            .with_spacer(10.)
     })
     .horizontal()
     .with_spacing(10.);
 
-    App::from_parts(
-        Flex::column()
-            .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
-            .with_child(Scroll::new(channels.lens(State::channels)).horizontal()),
-        tx,
-    )
+    Flex::column()
+        .main_axis_alignment(MainAxisAlignment::SpaceEvenly)
+        .with_child(Scroll::new(channels.lens(State::channels)).horizontal())
+        .padding(10.)
+        .controller(Syncer::new(tx))
 }
 
 struct Delegate {
@@ -179,7 +234,7 @@ impl Delegate {
 impl AppDelegate<State> for Delegate {
     fn command(
         &mut self,
-        _ctx: &mut DelegateCtx,
+        ctx: &mut DelegateCtx,
         _target: Target,
         cmd: &Command,
         data: &mut State,
@@ -188,10 +243,73 @@ impl AppDelegate<State> for Delegate {
         if let Some(msg) = cmd.get(UPDATE) {
             data.update(msg);
             Handled::Yes
+        } else if let Some(()) = cmd.get(SHOW_LOW_PASS) {
+            ctx.new_window(low_pass_window());
+            Handled::Yes
+        } else if let Some(()) = cmd.get(SHOW_INPUT_SPECTRUM) {
+            ctx.new_window(input_spectrum_window());
+            Handled::Yes
+        } else if let Some(()) = cmd.get(SHOW_OUTPUT_SPECTRUM) {
+            ctx.new_window(output_spectrum_window());
+            Handled::Yes
         } else {
             Handled::No
         }
     }
+}
+
+fn main_menu() -> MenuDesc<State> {
+    MenuDesc::new(SPECTRA_MENU.with_placeholder("Spectra"))
+        .append(MenuItem::new(
+            LOW_PASS_MENU_ITEM.with_placeholder("Low pass filter"),
+            SHOW_LOW_PASS,
+        ))
+        .append(MenuItem::new(
+            INPUT_SPECTRUM_MENU_ITEM.with_placeholder("Input spectrum"),
+            SHOW_INPUT_SPECTRUM,
+        ))
+        .append(MenuItem::new(
+            OUTPUT_SPECTRUM_MENU_ITEM.with_placeholder("Output spectrum"),
+            SHOW_OUTPUT_SPECTRUM,
+        ))
+}
+
+fn low_pass_window() -> WindowDesc<State> {
+    WindowDesc::new(|| {
+        LineChart::new().lens(
+            line_chart_base()
+                .title(Constant(ArcStr::from("Low pass filter")))
+                .y_data(State::low_pass_spectrum)
+                .build(),
+        )
+    })
+    .title(LOW_PASS_MENU_ITEM.with_placeholder("Low pass filter"))
+}
+
+fn input_spectrum_window() -> WindowDesc<State> {
+    WindowDesc::new(|| {
+        WidgetExt::lens(
+            LineChart::new(),
+            line_chart_base()
+                .title(Constant(ArcStr::from("Input spectrum")))
+                .y_data(State::audio_in_spectrum)
+                .build(),
+        )
+    })
+    .title(INPUT_SPECTRUM_MENU_ITEM.with_placeholder("Input spectrum"))
+}
+
+fn output_spectrum_window() -> WindowDesc<State> {
+    WindowDesc::new(|| {
+        WidgetExt::lens(
+            LineChart::new(),
+            line_chart_base()
+                .title(Constant(ArcStr::from("Output spectrum")))
+                .y_data(State::audio_out_spectrum)
+                .build(),
+        )
+    })
+    .title(OUTPUT_SPECTRUM_MENU_ITEM.with_placeholder("Output spectrum"))
 }
 
 pub fn run(
@@ -204,12 +322,15 @@ pub fn run(
     let len_channels = config.channels.len() as f64;
     let ui_handle = thread::spawn(move || {
         let window = WindowDesc::new(move || build_ui(tx))
-            .title(APP_TITLE.clone().with_placeholder("mixjack"))
+            .title(APP_TITLE.with_placeholder("mixjack"))
+            .menu(main_menu())
             .window_size((
                 len_channels * widgets::WIDTH + (len_channels + 1.) * PADDING,
                 3.0 * widgets::KNOB_HEIGHT + widgets::FADER_HEIGHT + 5.0 * PADDING,
             ));
-        let launcher = AppLauncher::with_window(window).delegate(Delegate::new());
+        let launcher = AppLauncher::with_window(window)
+            .configure_env(|env, _| druid_graphs::add_to_env(env))
+            .delegate(Delegate::new());
         oneshot_tx.send(launcher.get_external_handle()).unwrap();
         drop(oneshot_tx);
 
@@ -221,16 +342,35 @@ pub fn run(
     Ok((evt_sink, ui_handle))
 }
 
-// util
-
-fn lens_not<A>(input: impl Lens<A, bool>) -> impl Lens<A, bool> {
-    input.map(|v| !v, |data, value| *data = !value)
+fn line_chart_base<L1, L2>() -> LineChartDataLensBuilder<
+    L1,
+    Constant<ArcStr>,
+    Constant<Option<Range>>,
+    Constant<bool>,
+    Constant<bool>,
+    Constant<Option<Vector<f64>>>,
+    Constant<Option<Range>>,
+    Constant<bool>,
+    Constant<bool>,
+    L2,
+> {
+    LineChartData::<ArcStr, ArcStr>::lens_builder()
+        .x_axis_label(Constant(ArcStr::from("Frequency (Hz)")))
+        .x_range(Constant(None))
+        .draw_x_tick_labels(Constant(true))
+        .draw_x_axis(Constant(false))
+        // hard code bin frequencies for now (assume sampling frequency is 44_100 Hz)
+        .x_data(Constant(bins()))
+        .y_range(Constant(Some(Range::new(0., 1.))))
+        .draw_y_tick_labels(Constant(true))
+        .draw_y_axis(Constant(true))
 }
 
-fn label_fixed_width<T: Data>(label: &str) -> impl Widget<T> {
-    Label::new(label).center().fix_width(50.0)
-}
-
-fn switch() -> impl Widget<bool> {
-    Switch::new().center()
+fn bins() -> Option<Vector<f64>> {
+    Some(
+        (0..256)
+            .into_iter()
+            .map(|idx| idx as f64 * 44_100. / 256.)
+            .collect::<Vector<_>>(),
+    )
 }

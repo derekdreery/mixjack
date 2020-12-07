@@ -27,11 +27,21 @@ im = { version = "15.0.0", features = ["serde"] }
 toml = "0.5.7"
 directories = "3.0.1"
 fnv = "1.0.7"
+dasp = { version = "0.11.0", features = ["ring_buffer"] }
+fftw = "0.7.0-alpha.0"
+parking_lot_core = "0.8.0"
+parking_lot = "0.11.1"
+
 
 [dependencies.druid]
 version = "0.6"
 features = ["im"]
-git = "https://github.com/linebender/druid"
+#git = "https://github.com/linebender/druid"
+path = "../../contrib/druid/druid"
+
+[dependencies.druid-graphs]
+version = "0.1"
+path = "../../owned/druid-graphs"
 
 [workspace]
 members = [
@@ -41,5 +51,7 @@ members = [
 
 
 [patch.crates-io]
-#druid = { version = "0.6", path = "../../contrib/druid/druid" }
+#druid = { version = "0.6", features = ["im"], path = "../../contrib/druid/druid" }
 #kurbo = { version = "0.5.11", path = "../../contrib/kurbo" }
+dasp = { path = "../../contrib/dasp/dasp" }
+fftw = { path = "../..//contrib/fftw-rs/fftw" }

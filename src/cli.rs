@@ -30,6 +30,12 @@ pub struct Opt {
     /// location.
     #[structopt(long = "config-file", parse(from_os_str))]
     pub config_file: Option<PathBuf>,
+    /// If this flag is passed, the program will print the filters to stdout and exit.
+    #[structopt(long = "print-filters")]
+    pub print_filters: bool,
+    /// If this flag is passed, the program will print the filter window to stdout and exit.
+    #[structopt(long = "print-window")]
+    pub print_window: bool,
 }
 
 #[derive(Deserialize, Clone, Debug)]

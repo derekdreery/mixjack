@@ -5,7 +5,7 @@ use druid::{
         kurbo::{Arc, BezPath, Line, PathEl},
         Brush,
     },
-    widget::prelude::*,
+    widget::{prelude::*, Controller},
     Color, Data, Insets, MouseButton, MouseEvent, Point, Rect, Vec2, Widget, WidgetPod,
 };
 use std::f64::consts::FRAC_PI_4;
@@ -16,51 +16,27 @@ pub const FADER_HEIGHT: f64 = 200.0;
 
 const SLIDER_HEIGHT: f64 = 20.0;
 
-pub struct App {
-    inner: WidgetPod<State, Box<dyn Widget<State>>>,
+pub struct Syncer {
     tx: channel::Sender<AudioMsg>,
 }
 
-impl App {
-    pub fn from_parts(inner: impl Widget<State> + 'static, tx: channel::Sender<AudioMsg>) -> Self {
-        App {
-            inner: WidgetPod::new(inner).boxed(),
-            tx,
-        }
+impl<W: Widget<State>> Controller<State, W> for Syncer {
+    fn update(
+        &mut self,
+        child: &mut W,
+        ctx: &mut UpdateCtx,
+        old_data: &State,
+        data: &State,
+        env: &Env,
+    ) {
+        child.update(ctx, old_data, data, env);
+        data.sync_audio(old_data, &self.tx).unwrap();
     }
 }
 
-impl Widget<State> for App {
-    fn event(&mut self, ctx: &mut EventCtx, event: &Event, data: &mut State, env: &Env) {
-        let old_data = data.clone();
-        self.inner.event(ctx, event, data, env);
-        if *data != old_data {
-            data.sync_audio(&old_data, &self.tx).unwrap();
-        }
-    }
-
-    fn lifecycle(&mut self, ctx: &mut LifeCycleCtx, event: &LifeCycle, data: &State, env: &Env) {
-        self.inner.lifecycle(ctx, event, data, env)
-    }
-
-    fn update(&mut self, ctx: &mut UpdateCtx, _old_data: &State, new_data: &State, env: &Env) {
-        self.inner.update(ctx, new_data, env)
-    }
-
-    fn layout(
-        &mut self,
-        ctx: &mut LayoutCtx,
-        bc: &BoxConstraints,
-        new_data: &State,
-        env: &Env,
-    ) -> Size {
-        self.inner
-            .set_layout_rect(ctx, new_data, env, bc.max().to_rect());
-        self.inner.layout(ctx, bc, new_data, env)
-    }
-
-    fn paint(&mut self, ctx: &mut PaintCtx, data: &State, env: &Env) {
-        self.inner.paint(ctx, data, env)
+impl Syncer {
+    pub fn new(tx: channel::Sender<AudioMsg>) -> Self {
+        Self { tx }
     }
 }
 
@@ -205,14 +181,14 @@ pub struct FaderData {
 #[derive(Debug, Data, Clone)]
 pub struct Fader {
     drag_start: Option<DragStart>,
-    all_time_max: f64,
+    all_time_max_in: f64,
 }
 
 impl Fader {
     pub fn new() -> Self {
         Fader {
             drag_start: None,
-            all_time_max: 0.0,
+            all_time_max_in: 0.0,
         }
     }
 }
@@ -246,10 +222,7 @@ impl Widget<FaderData> for Fader {
                     }
                 }
             }
-            Event::MouseUp(MouseEvent {
-                button: MouseButton::Left,
-                ..
-            }) => {
+            Event::MouseUp(e) => {
                 self.drag_start = None;
                 ctx.set_active(false);
             }
@@ -259,7 +232,7 @@ impl Widget<FaderData> for Fader {
 
     fn update(&mut self, ctx: &mut UpdateCtx, old: &FaderData, new: &FaderData, _env: &Env) {
         if old != new {
-            self.all_time_max = new.metering.max;
+            self.all_time_max_in = new.metering.max_in;
             ctx.request_paint();
         }
     }
@@ -287,8 +260,10 @@ impl Widget<FaderData> for Fader {
     fn paint(&mut self, ctx: &mut PaintCtx, data: &FaderData, _env: &Env) {
         // Clamp the relative position.
         let position = data.position.min(1.0).max(0.0);
-        let rms = data.metering.rms.min(1.0).max(0.0);
-        let max = data.metering.max.min(1.0).max(0.0);
+        let max_in = data.metering.max_in.min(1.0).max(0.0);
+        let rms_in = data.metering.rms_in.min(1.0).max(0.0);
+        let max_out = data.metering.max_out.min(1.0).max(0.0);
+        let rms_out = data.metering.rms_out.min(1.0).max(0.0);
 
         let light_brush = ctx.solid_brush(Color::WHITE);
         let dark_brush = ctx.solid_brush(Color::grey(0.5));
@@ -308,14 +283,21 @@ impl Widget<FaderData> for Fader {
         let bottom = Point::new(center.x, bounds.max_y());
         let fader_center = bottom.lerp(top, position);
 
-        let max_top = bottom.lerp(top, max).y;
-        let rms_top = bottom.lerp(top, rms).y;
+        let max_in_top = bottom.lerp(top, max_in).y;
+        let rms_in_top = bottom.lerp(top, rms_in).y;
+        let max_out_top = bottom.lerp(top, max_out).y;
+        let rms_out_top = bottom.lerp(top, rms_out).y;
 
         let level_start_x = lerp(bounds.x0, bounds.x1, 0.2);
+        let level_mid_x = lerp(bounds.x0, bounds.x1, 0.5);
         let level_end_x = lerp(bounds.x0, bounds.x1, 0.8);
         if data.show_levels {
             ctx.fill(
-                Rect::from_points((level_start_x, rms_top), (level_end_x, bounds.y1)),
+                Rect::from_points((level_start_x, rms_in_top), (level_mid_x, bounds.y1)),
+                &rms_brush,
+            );
+            ctx.fill(
+                Rect::from_points((level_mid_x, rms_out_top), (level_end_x, bounds.y1)),
                 &rms_brush,
             );
         }
@@ -324,7 +306,7 @@ impl Widget<FaderData> for Fader {
         ctx.stroke(Line::new(top, bottom), &dark_brush, 2.0);
         ctx.stroke(Line::new(fader_center, bottom), &light_brush, 2.0);
         fader(
-            from_center_size(fader_center, (bounds.size().width, SLIDER_HEIGHT)),
+            Rect::from_center_size(fader_center, (bounds.size().width, SLIDER_HEIGHT)),
             if position == 0.0 {
                 &dark_brush
             } else {
@@ -337,7 +319,11 @@ impl Widget<FaderData> for Fader {
         // draw sound level
         if data.show_levels {
             ctx.fill(
-                Rect::new(level_start_x, max_top, level_end_x, bounds.y1),
+                Rect::new(level_start_x, max_in_top, level_mid_x, bounds.y1),
+                &max_brush,
+            );
+            ctx.fill(
+                Rect::new(level_mid_x, max_out_top, level_end_x, bounds.y1),
                 &max_brush,
             );
         }
@@ -355,7 +341,7 @@ fn fader(bounds: Rect, fg_brush: &Brush, bg_brush: &Brush, ctx: &mut PaintCtx) {
 
     // TODO make this function independent of position (so that the path can be cached)
     const CURVE_FACTOR: f64 = 0.15;
-    let shape = vec![
+    let shape = [
         PathEl::MoveTo(Point::new(bounds.x0, bounds.y0)),
         PathEl::QuadTo(
             bounds.center() - Vec2::new(0.0, bounds.height() * (0.5 - CURVE_FACTOR)),
@@ -369,37 +355,15 @@ fn fader(bounds: Rect, fg_brush: &Brush, bg_brush: &Brush, ctx: &mut PaintCtx) {
         PathEl::ClosePath,
     ];
 
-    ctx.fill(&*shape, bg_brush);
-    ctx.stroke(&*shape, fg_brush, 1.5);
+    ctx.fill(&shape[..], bg_brush);
+    ctx.stroke(&shape[..], fg_brush, 1.5);
     ctx.stroke(center_line, fg_brush, 2.0);
-}
-
-fn arc(arc: Arc) -> BezPath {
-    let start = circle_point(arc.center, arc.radii, arc.start_angle);
-
-    let mut out = BezPath::new();
-    out.move_to(start);
-    for el in arc.append_iter(1.0) {
-        out.push(el);
-    }
-    out
 }
 
 fn circle_point(center: Point, radii: Vec2, angle: f64) -> Point {
     Point {
         x: center.x - angle.sin() * radii.y,
         y: center.y + angle.cos() * radii.x,
-    }
-}
-
-fn from_center_size(center: impl Into<Point>, size: impl Into<Size>) -> Rect {
-    let size = 0.5 * size.into();
-    let center = center.into();
-    Rect {
-        x0: center.x - size.width,
-        y0: center.y - size.height,
-        x1: center.x + size.width,
-        y1: center.y + size.height,
     }
 }
 
