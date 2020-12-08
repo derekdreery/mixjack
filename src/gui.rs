@@ -2,13 +2,13 @@ use crate::{
     audio::{AudioMsg, AudioMsgKind},
     cli::Config,
     data::{ChannelMode, Metering},
-    gui::widgets::{Fader, FaderData, Knob, Syncer},
+    gui::widgets::{Fader, FaderData, Knob, LightRadio, Syncer},
     Result,
 };
 use crossbeam_channel as channel;
 use druid::{
     lens::{Constant, Map as LensMap},
-    widget::{prelude::*, Flex, Label, List, MainAxisAlignment, RadioGroup, Scroll, Switch},
+    widget::{prelude::*, Flex, Label, List, MainAxisAlignment, Radio, Scroll, Switch},
     AppDelegate, AppLauncher, ArcStr, Color, Command, Data, DelegateCtx, ExtEventSink, Handled,
     Lens, LensExt, LocalizedString, MenuDesc, MenuItem, Selector, Target, Widget, WidgetExt,
     WindowDesc,
@@ -132,6 +132,7 @@ impl Data for ChannelState {
             && Data::same(&self.gain, &other.gain)
             && Data::same(&self.metering_on, &other.metering_on)
             && (Data::same(&self.metering, &other.metering) || !self.metering_on)
+            && Data::same(&self.mode, &other.mode)
     }
 }
 
@@ -193,18 +194,23 @@ fn build_ui(tx: channel::Sender<AudioMsg>) -> impl Widget<State> {
             .with_child(Switch::new().lens(ChannelState::metering_on))
             .with_spacer(10.)
             .with_child(
-                RadioGroup::new(
-                    [
-                        ("normal", ChannelMode::Normal),
-                        ("bypass", ChannelMode::Bypass),
-                        ("mute", ChannelMode::Mute),
-                    ]
-                    .iter()
-                    .copied(),
+                LightRadio::new(
+                    Color::rgb8(0, 128, 255),
+                    ChannelMode::Bypass,
+                    ChannelMode::Normal,
                 )
                 .lens(ChannelState::mode),
             )
-            .with_spacer(10.)
+            .with_default_spacer()
+            .with_child(
+                LightRadio::new(
+                    Color::rgb8(255, 0, 0),
+                    ChannelMode::Mute,
+                    ChannelMode::Normal,
+                )
+                .lens(ChannelState::mode),
+            )
+            .with_spacer(10.) // to keep the scrollbar away from above
     })
     .horizontal()
     .with_spacing(10.);

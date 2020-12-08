@@ -5,6 +5,7 @@ use druid::{
         kurbo::{Arc, BezPath, Line, PathEl},
         Brush,
     },
+    theme,
     widget::{prelude::*, Controller},
     Color, Data, Insets, MouseButton, MouseEvent, Point, Rect, Vec2, Widget, WidgetPod,
 };
@@ -326,6 +327,69 @@ impl Widget<FaderData> for Fader {
                 Rect::new(level_mid_x, max_out_top, level_end_x, bounds.y1),
                 &max_brush,
             );
+        }
+    }
+}
+
+/// A small radio button that contains an indicator light if currently clicked.
+pub struct LightRadio<E> {
+    color: Color,
+    variant: E,
+    /// The variant to go to if the button is selected then clicked.
+    off_variant: E,
+}
+
+impl<E> LightRadio<E> {
+    pub fn new(color: Color, variant: E, off_variant: E) -> Self {
+        LightRadio {
+            color,
+            variant,
+            off_variant,
+        }
+    }
+}
+
+impl<E: Copy + PartialEq> Widget<E> for LightRadio<E> {
+    fn event(&mut self, ctx: &mut EventCtx, event: &Event, data: &mut E, _env: &Env) {
+        match event {
+            Event::MouseDown(MouseEvent {
+                button: MouseButton::Left,
+                window_pos,
+                ..
+            }) => {
+                ctx.set_active(true);
+            }
+            Event::MouseUp(e) => {
+                if ctx.is_active() && ctx.is_hot() {
+                    if data == &self.variant {
+                        *data = self.off_variant;
+                    } else {
+                        *data = self.variant;
+                    }
+                }
+                ctx.set_active(false);
+            }
+            _ => (),
+        }
+    }
+
+    fn update(&mut self, ctx: &mut UpdateCtx, old: &E, new: &E, _env: &Env) {
+        if old != new {
+            ctx.request_paint();
+        }
+    }
+
+    fn lifecycle(&mut self, _ctx: &mut LifeCycleCtx, _event: &LifeCycle, _data: &E, _env: &Env) {}
+
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints, _data: &E, _env: &Env) -> Size {
+        bc.constrain(Size::new(20., 10.))
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, data: &E, env: &Env) {
+        let rect = ctx.size().to_rect();
+        ctx.stroke(rect.inset(-1.), &env.get(theme::BORDER_DARK), 1.0);
+        if data == &self.variant {
+            ctx.fill(rect, &self.color);
         }
     }
 }
